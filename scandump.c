@@ -230,7 +230,7 @@ int do_scan_trigger(struct nl_sock *socket, int if_index, int genl_id) {
     while (err > 0) ret = nl_recvmsgs(socket, cb);  // First wait for ack_handler(). This helps with basic errors.
     if (ret < 0) {
         fprintf(stderr, "command failed: %s (%d)\n", nl_geterror(-ret), err);
-        return ret;
+        return err;
     }
 
     while (!results.done) nl_recvmsgs(socket, cb);
@@ -254,6 +254,7 @@ int main(int argc, char *argv[]) {
     pcap_dumper_t *dumper = NULL;
     int linktype = DLT_IEEE802_11_RADIO;
     int snaplen = 65535;
+    int max_retries = 1;
 
     if (argc == 2) {
         if (strcmp(argv[1], "--version") == 0) {
@@ -304,6 +305,12 @@ int main(int argc, char *argv[]) {
         // Trigger scan and wait for it to finish
         int err = do_scan_trigger(socket, if_index, genl_id);
         if (err != 0) {
+            if (err == -EBUSY && max_retries > 0) {
+                sleep(5);
+                max_retries--;
+                continue;
+            }
+
             return err;
         }
 
