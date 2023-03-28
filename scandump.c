@@ -105,7 +105,7 @@ static int callback_dump(struct nl_msg *msg, void *arg) {
         [NL80211_BSS_CAPABILITY] = { .type = NLA_U16 },
         [NL80211_BSS_SIGNAL_MBM] = { .type = NLA_U32 },
         [NL80211_BSS_STATUS] = { .type = NLA_U32 },
-        [NL80211_BSS_BEACON_IES] = { },
+        [NL80211_BSS_INFORMATION_ELEMENTS] = { },
     };
 
     // Parse and error check.
@@ -119,7 +119,7 @@ static int callback_dump(struct nl_msg *msg, void *arg) {
     }
 
     if (!bss[NL80211_BSS_BSSID]) return NL_SKIP;
-    if (!bss[NL80211_BSS_BEACON_IES]) return NL_SKIP;
+    if (!bss[NL80211_BSS_INFORMATION_ELEMENTS]) return NL_SKIP;
 
     // Prepare packet
     memcpy(packet, packet_header, packet_header_len);
@@ -167,8 +167,8 @@ static int callback_dump(struct nl_msg *msg, void *arg) {
     packet[48] = (beacon_cap >> 8) & 0xFF;
 
     // IEs
-    u_char *ie_data = nla_data(bss[NL80211_BSS_BEACON_IES]);
-    int ie_data_len = nla_len(bss[NL80211_BSS_BEACON_IES]);
+    u_char *ie_data = nla_data(bss[NL80211_BSS_INFORMATION_ELEMENTS]);
+    int ie_data_len = nla_len(bss[NL80211_BSS_INFORMATION_ELEMENTS]);
     int payload_len = min(ie_data_len, MAX_PACKET_SIZE - packet_header_len);
     memcpy(packet + packet_header_len, ie_data, payload_len);
 
