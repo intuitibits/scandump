@@ -19,8 +19,8 @@ sudo make install
 ## Usage
 
 ```shell
-Usage: scandump --version
-       scandump <interface> <filename>
+Usage: scandump <interface> <filename>
+       scandump --version
 ```
 
 Where `<interface>` is the name of the WLAN interface (e.g. `wlan0`), and `<filename>` is the name of the PCAP file to be generated. Standard output is used if file is `-`.
