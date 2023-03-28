@@ -21,7 +21,7 @@
 #include <linux/nl80211.h>
 #include <pcap.h>
 
-#define VERSION "1.0"
+#define VERSION "1.0.1"
 
 #define NL80211_GENL_FAMILY_NAME "nl80211"
 #define NL80211_GENL_GROUP_NAME "scan"
