@@ -7,11 +7,10 @@ A command-line utility that scans for Wi-Fi networks using the 802.11 netlink AP
 ```shell
 # Install pre-requisites
 sudo apt update
-sudo apt install libnl-genl3-dev
-sudo apt install libpcap-dev
+sudo apt install git libnl-genl-3-dev libpcap-dev
 
 # Download, build, and install scandump
-git checkout https://github.com/intuitibits/scandump.git
+git clone https://github.com/intuitibits/scandump.git
 cd scandump
 make
 sudo make install
