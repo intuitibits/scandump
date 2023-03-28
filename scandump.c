@@ -264,8 +264,8 @@ int main(int argc, char *argv[]) {
     }
 
     if (argc != 3) {
-        printf("Usage: %s --version\n", basename(argv[0]));
-        printf("       %s <interface> <filename>\n", basename(argv[0]));
+        printf("Usage: %s <interface> <filename>\n", basename(argv[0]));
+        printf("       %s --version\n", basename(argv[0]));
         return EXIT_FAILURE;
     }
 
