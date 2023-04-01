@@ -21,7 +21,7 @@
 #include <linux/nl80211.h>
 #include <pcap.h>
 
-#define VERSION "1.0.1"
+#define VERSION "1.0.2"
 
 #define NL80211_GENL_FAMILY_NAME "nl80211"
 #define NL80211_GENL_GROUP_NAME "scan"
@@ -254,7 +254,6 @@ int main(int argc, char *argv[]) {
     pcap_dumper_t *dumper = NULL;
     int linktype = DLT_IEEE802_11_RADIO;
     int snaplen = 65535;
-    int max_retries = 1;
 
     if (argc == 2) {
         if (strcmp(argv[1], "--version") == 0) {
@@ -305,9 +304,8 @@ int main(int argc, char *argv[]) {
         // Trigger scan and wait for it to finish
         int err = do_scan_trigger(socket, if_index, genl_id);
         if (err != 0) {
-            if (err == -EBUSY && max_retries > 0) {
-                sleep(5);
-                max_retries--;
+            if (err == -EBUSY || err == -ENOTTY) {
+                sleep(2);
                 continue;
             }
 
@@ -341,8 +339,7 @@ int main(int argc, char *argv[]) {
         nlmsg_free(msg);
 
         if (ret < 0) {
-            fprintf(stderr, "command failed: %s (%d)\n", nl_geterror(-ret), ret);
-            return ret;
+            fprintf(stderr, "warning: %s (%d)\n", nl_geterror(-ret), ret);
         }
 
         pcap_dump_flush(dumper);
