@@ -309,11 +309,15 @@ int main(int argc, char *argv[]) {
     // Trigger scan and wait for it to finish
     int err = do_scan_trigger(socket, if_index, genl_id);
     if (err != 0) {
+      // Errors -16 (-EBUSY), -25 (-ENOTTY), or -33 (-EDOM)
+      // can happen for various reasons when doing a scan
+      // but we can simply retry.
       if (err == -EBUSY || err == -ENOTTY || err == -EDOM) {
         sleep(2);
         continue;
       }
 
+      // Other errors are not expected, so we quit.
       return err;
     }
 
