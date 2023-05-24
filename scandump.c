@@ -22,7 +22,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 
-#define VERSION "1.0.3"
+#define VERSION "1.0.4"
 
 #define NL80211_GENL_FAMILY_NAME "nl80211"
 #define NL80211_GENL_GROUP_NAME "scan"
@@ -309,7 +309,7 @@ int main(int argc, char *argv[]) {
     // Trigger scan and wait for it to finish
     int err = do_scan_trigger(socket, if_index, genl_id);
     if (err != 0) {
-      if (err == -EBUSY || err == -ENOTTY) {
+      if (err == -EBUSY || err == -ENOTTY || err == -EDOM) {
         sleep(2);
         continue;
       }
