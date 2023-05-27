@@ -1,6 +1,3 @@
-# Prerequisites
-*.d
-
 # Object files
 *.o
 *.ko
@@ -51,4 +48,9 @@ Module.symvers
 Mkfile.old
 dkms.conf
 
-scandump
+/scandump
+debhelper-build-stamp
+.debhelper
+*.substvars
+debian/files
+debian/scandump
