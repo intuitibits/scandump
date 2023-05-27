@@ -3,7 +3,6 @@ Section: net
 Priority: optional
 Maintainer: Adrian Granados <adrian@intuitibits.com>
 Build-Depends:
-  debhelper-compat (= 12),
   libnl-3-dev (>= 3.2.3-2~),
   libnl-genl-3-dev (>= 3.2.3-2~),
   libpcap-dev

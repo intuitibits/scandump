@@ -17,7 +17,8 @@ $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 install: $(TARGET)
-	install -m 755 $(TARGET) $(DESTDIR)/usr/local/bin
+	mkdir -p $(DESTDIR)/usr/bin
+	install -m 755 $(TARGET) $(DESTDIR)/usr/bin
 
 clean:
 	rm -f $(OBJS) $(TARGET)
