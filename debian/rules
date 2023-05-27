@@ -1,0 +1,14 @@
+#!/usr/bin/make -f
+
+clean:
+	make clean
+
+build:
+	make
+
+binary:
+	make install DESTDIR=debian/scandump
+	strip --strip-all debian/scandump/usr/local/bin/scandump
+	dh_makeshlibs
+	dh_gencontrol
+	dh_builddeb

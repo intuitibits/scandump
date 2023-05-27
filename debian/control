@@ -1,0 +1,12 @@
+Source: scandump
+Section: devel
+Priority: optional
+Maintainer: Adrian Granados <adrian@intuitibits.com>
+Build-Depends: build-essential, debhelper (>= 9)
+
+Package: scandump
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: A command line utility that scans
+  for Wi-Fi networks using the 802.11 netlink API
+  and outputs the scan results in PCAP format.
