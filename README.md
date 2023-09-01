@@ -23,9 +23,9 @@ Usage: scandump <interface> <filename>
        scandump --version
 ```
 
-Where `<interface>` is the name of the WLAN interface (e.g. `wlan0`), and `<filename>` is the name of the PCAP file to be generated. Standard output is used if file is `-`.
+Where `<interface>` is the name of the WLAN interface (e.g. `wlan0`), and `<filename>` is the name of the PCAP file to be generated. Standard output is used if filename is `-`.
 
-The command must be run as root since only privileged users can initiate a scan.
+The command must be run as root since only privileged processes can initiate a scan.
 
 ## Example
 
