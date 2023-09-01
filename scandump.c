@@ -1,9 +1,6 @@
 /*
 ** Copyright (c) 2023 Intuitibits LLC
 ** Author: Adrian Granados <adrian@intuitibits.com>
-**
-** Based on:
-** https://github.com/Robpol86/libnl/blob/master/example_c/scan_access_points.c
 */
 
 #define _GNU_SOURCE
