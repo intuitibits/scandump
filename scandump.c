@@ -123,7 +123,7 @@ static int callback_dump(struct nl_msg *msg, void *arg) {
   if (!bss[NL80211_BSS_INFORMATION_ELEMENTS])
     return NL_SKIP;
 
-  // Prepare packet
+  // Prepare packet with radiotap and beacon headers.
   memcpy(packet, packet_header, PACKET_HEADER_LEN);
 
   // Channel frequency
@@ -173,12 +173,12 @@ static int callback_dump(struct nl_msg *msg, void *arg) {
   int payload_len = min(ie_data_len, MAX_PACKET_SIZE - PACKET_HEADER_LEN);
   memcpy(packet + PACKET_HEADER_LEN, ie_data, payload_len);
 
-  // Update pcap header
+  // Update pcap header with final length values.
   header.caplen = PACKET_HEADER_LEN + payload_len;
   header.len = PACKET_HEADER_LEN + ie_data_len;
   gettimeofday(&(header.ts), NULL);
 
-  // Write packet out
+  // Write packet out.
   pcap_dump((u_char *)dumper, &header, (u_char *)packet);
 
   return NL_SKIP;
@@ -321,7 +321,7 @@ int main(int argc, char *argv[]) {
       return err;
     }
 
-    // Open pcap file if needed if first scan is sucessful
+    // Open pcap file if needed if first scan is successful.
     if (dumper == NULL) {
       if (strcmp(file, "-") == 0) {
         dumper = pcap_dump_fopen(handle, stdout);
@@ -337,7 +337,7 @@ int main(int argc, char *argv[]) {
       }
     }
 
-    // Dump networks found
+    // Dump networks found into file.
     struct nl_msg *msg = nlmsg_alloc();
     genlmsg_put(msg, 0, 0, genl_id, 0, NLM_F_DUMP, NL80211_CMD_GET_SCAN, 0);
     nla_put_u32(msg, NL80211_ATTR_IFINDEX, if_index);
