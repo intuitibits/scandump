@@ -2,6 +2,10 @@
 
 A command-line utility that scans for Wi-Fi networks using the 802.11 netlink API and outputs the scan results in PCAP format.
 
+Typically, processes that need to gather data about nearby Wi-Fi networks would do a scan using [iw](https://wireless.wiki.kernel.org/en/users/documentation/iw) and scrap its text output. However, it is generally a bad idea to try parsing another program's output if it is not designed to be consumed by other processes. The text may change with newer updates or simply by running the program on a different system. 
+
+With **scandump**, no more scrapping is needed. As an additional benefit, you can generate a PCAP file with radiotap + beacon frame data from the scan using a wireless interface that may not support monitor mode.
+
 ## Installation
 
 ```shell
