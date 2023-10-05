@@ -27,6 +27,8 @@
 
 #define MAX_PACKET_SIZE 2048
 
+#define MAX_FREQS 100
+
 #ifndef min
 #define min(a, b) ((a) < (b) ? (a) : (b))
 #endif
@@ -182,7 +184,7 @@ static int callback_dump(struct nl_msg *msg, void *arg) {
   return NL_SKIP;
 }
 
-int do_scan_trigger(struct nl_sock *socket, int if_index, int genl_id, int passive) {
+int do_scan_trigger(struct nl_sock *socket, int if_index, int genl_id, int passive, int freqs[], int num_freqs) {
 
   // Starts the scan and waits for it to finish.
   // Does not return until the scan is done or has been aborted.
@@ -212,9 +214,27 @@ int do_scan_trigger(struct nl_sock *socket, int if_index, int genl_id, int passi
 
   // Setup the message and callback handlers.
   genlmsg_put(msg, 0, 0, genl_id, 0, 0, NL80211_CMD_TRIGGER_SCAN, 0);
-  // Configure active or passive scan.
-  if (!passive) nla_put(msg, NL80211_ATTR_SCAN_SSIDS, 0, NULL);
+
+  // Configure desired interface.
   nla_put_u32(msg, NL80211_ATTR_IFINDEX, if_index);
+
+  // Configure active or passive scan.
+  // If passive, omit NL80211_ATTR_SCAN_SSIDS, otherwise, set a NULL SSID.
+  if (!passive) {
+    struct nlattr *ssids_attr = nla_nest_start(msg, NL80211_ATTR_SCAN_SSIDS);
+    nla_put(msg, 1, 0, NULL); // NULL SSID
+    nla_nest_end(msg, ssids_attr);
+  }
+
+  // Configure scan frequencies (MHz).
+  if (num_freqs > 0) {
+    struct nlattr *freq_attr = nla_nest_start(msg, NL80211_ATTR_SCAN_FREQUENCIES);
+    for (int i = 0; i < num_freqs; i++) {
+      nla_put_u32(msg, i + 1, freqs[i]);
+    }
+    nla_nest_end(msg, freq_attr);
+  }
+
   // Configure callbacks.
   nl_cb_set(cb, NL_CB_VALID, NL_CB_CUSTOM, callback_trigger, &results);
   nl_cb_err(cb, NL_CB_CUSTOM, error_handler, &err);
@@ -253,12 +273,13 @@ int do_scan_trigger(struct nl_sock *socket, int if_index, int genl_id, int passi
 
 void print_usage(const char *program_name)
 {
-  printf("Usage: %s [-c count] [-p] [-h] [--version] <interface> <filename>\n", program_name);
+  printf("Usage: %s [-c count] [-f frequency-list] [-p] [-h] [--version] <interface> <filename>\n", program_name);
   printf("Options:\n");
-  printf("  -c, --count     Exit after the specified number of scans\n");
-  printf("  -p, --passive   Use passive scan mode\n");
-  printf("  -h, --help      Display this help message\n");
-  printf("  --version       Show version\n");
+  printf("  -c, --count         Exit after the specified number of scans\n");
+  printf("  -f, --frequency     Comma-separated list of frequencies in MHz to scan\n");
+  printf("  -p, --passive       Use passive scan mode\n");
+  printf("  -h, --help          Display this help message\n");
+  printf("  --version           Show version\n");
 }
 
 int main(int argc, char *argv[]) {
@@ -270,30 +291,37 @@ int main(int argc, char *argv[]) {
   pcap_dumper_t *dumper = NULL;
   int linktype = DLT_IEEE802_11_RADIO;
   int snaplen = 65535;
+
   int version_flag = 0;
-  int passive_flag = 0;
+  int use_passive = 0;
+  char* frequency_list = NULL;
+  int freqs[MAX_FREQS];
   int count = 0;
 
   struct option long_options[] = {
     {"count", required_argument, 0, 'c'},
+    {"frequency", required_argument, 0, 'f'},
     {"passive", no_argument, 0, 'p'},
     {"help", no_argument, 0, 'h'},
     {"version", no_argument, &version_flag, 1},
     {0, 0, 0, 0}
   };
 
-  while ((opt = getopt_long(argc, argv, "c:ph", long_options, NULL)) != -1) {
+  while ((opt = getopt_long(argc, argv, "c:f:ph", long_options, NULL)) != -1) {
     switch (opt) {
       case 'c':
         errno = 0;
         count = strtol(optarg, &endptr, 10);
         if (errno != 0 || *endptr != '\0') {
-          fprintf(stderr, "Invalid count: %s\n", optarg);
+          fprintf(stderr, "invalid count: %s\n", optarg);
           exit(EXIT_FAILURE);
         }
         break;
+      case 'f':
+        frequency_list = optarg;
+        break;
       case 'p':
-        passive_flag = 1;
+        use_passive = 1;
         break;
       case 'h':
           // Display help message
@@ -302,7 +330,6 @@ int main(int argc, char *argv[]) {
           break;
       case '?':
         // Handle unknown or missing options
-        fprintf(stderr, "Unknown option: %s\n", argv[optind - 1]);
         print_usage(basename(argv[0]));
         exit(EXIT_FAILURE);
         break;
@@ -314,6 +341,29 @@ int main(int argc, char *argv[]) {
     exit(EXIT_SUCCESS);
   }
 
+  // Process frequency list argument
+  int num_freqs = 0;
+  if (frequency_list) {
+    char *token = strtok(frequency_list, ",");
+    while (token != NULL) {
+
+      if (num_freqs >= MAX_FREQS) {
+        fprintf(stderr, "max number of frequencies is: %d\n", MAX_FREQS);
+        exit(EXIT_FAILURE);
+      }
+
+      int freq = strtol(token, &endptr, 10);
+      if (errno != 0 || *endptr != '\0') {
+        fprintf(stderr, "invalid frequency: %s\n", token);
+        exit(EXIT_FAILURE);
+      }
+
+      freqs[num_freqs++] = freq;
+      token = strtok(NULL, ",");
+    }
+  }
+
+  // Process interface and filename arguments
   if (optind + 2 != argc) {
     print_usage(basename(argv[0]));
     exit(EXIT_FAILURE);
@@ -354,7 +404,8 @@ int main(int argc, char *argv[]) {
   while ((count == 0) || (n < count)) {
 
     // Trigger scan and wait for it to finish
-    int err = do_scan_trigger(socket, if_index, genl_id, passive_flag);
+    int err = do_scan_trigger(socket, if_index, genl_id, use_passive, freqs, num_freqs);
+
     if (err != 0) {
       // Errors -16 (-EBUSY), -25 (-ENOTTY), or -33 (-EDOM)
       // can happen for various reasons when doing a scan
