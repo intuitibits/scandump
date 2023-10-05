@@ -6,6 +6,7 @@
 #define _GNU_SOURCE
 #include <ctype.h>
 #include <errno.h>
+#include <getopt.h>
 #include <linux/nl80211.h>
 #include <net/if.h>
 #include <netlink/genl/ctrl.h>
@@ -19,7 +20,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 
-#define VERSION "1.0.4"
+#define VERSION "2.0"
 
 #define NL80211_GENL_FAMILY_NAME "nl80211"
 #define NL80211_GENL_GROUP_NAME "scan"
@@ -181,7 +182,7 @@ static int callback_dump(struct nl_msg *msg, void *arg) {
   return NL_SKIP;
 }
 
-int do_scan_trigger(struct nl_sock *socket, int if_index, int genl_id) {
+int do_scan_trigger(struct nl_sock *socket, int if_index, int genl_id, int passive) {
 
   // Starts the scan and waits for it to finish.
   // Does not return until the scan is done or has been aborted.
@@ -211,8 +212,10 @@ int do_scan_trigger(struct nl_sock *socket, int if_index, int genl_id) {
 
   // Setup the message and callback handlers.
   genlmsg_put(msg, 0, 0, genl_id, 0, 0, NL80211_CMD_TRIGGER_SCAN, 0);
+  // Configure active or passive scan.
+  if (!passive) nla_put(msg, NL80211_ATTR_SCAN_SSIDS, 0, NULL);
   nla_put_u32(msg, NL80211_ATTR_IFINDEX, if_index);
-  nla_put(msg, NL80211_ATTR_SCAN_SSIDS, 0, NULL);
+  // Configure callbacks.
   nl_cb_set(cb, NL_CB_VALID, NL_CB_CUSTOM, callback_trigger, &results);
   nl_cb_err(cb, NL_CB_CUSTOM, error_handler, &err);
   nl_cb_set(cb, NL_CB_FINISH, NL_CB_CUSTOM, finish_handler, &err);
@@ -248,30 +251,76 @@ int do_scan_trigger(struct nl_sock *socket, int if_index, int genl_id) {
   return 0;
 }
 
+void print_usage(const char *program_name)
+{
+  printf("Usage: %s [-c count] [-p] [-h] [--version] <interface> <filename>\n", program_name);
+  printf("Options:\n");
+  printf("  -c, --count     Exit after the specified number of scans\n");
+  printf("  -p, --passive   Use passive scan mode\n");
+  printf("  -h, --help      Display this help message\n");
+  printf("  --version       Show version\n");
+}
+
 int main(int argc, char *argv[]) {
 
   struct nl_sock *socket;
-  int err;
+  int opt, err;
+  char *endptr;
   pcap_t *handle;
   pcap_dumper_t *dumper = NULL;
   int linktype = DLT_IEEE802_11_RADIO;
   int snaplen = 65535;
+  int version_flag = 0;
+  int passive_flag = 0;
+  int count = 0;
 
-  if (argc == 2) {
-    if (strcmp(argv[1], "--version") == 0) {
-      printf("%s version %s\n", basename(argv[0]), VERSION);
-      return EXIT_SUCCESS;
+  struct option long_options[] = {
+    {"count", required_argument, 0, 'c'},
+    {"passive", no_argument, 0, 'p'},
+    {"help", no_argument, 0, 'h'},
+    {"version", no_argument, &version_flag, 1},
+    {0, 0, 0, 0}
+  };
+
+  while ((opt = getopt_long(argc, argv, "c:ph", long_options, NULL)) != -1) {
+    switch (opt) {
+      case 'c':
+        errno = 0;
+        count = strtol(optarg, &endptr, 10);
+        if (errno != 0 || *endptr != '\0') {
+          fprintf(stderr, "Invalid count: %s\n", optarg);
+          exit(EXIT_FAILURE);
+        }
+        break;
+      case 'p':
+        passive_flag = 1;
+        break;
+      case 'h':
+          // Display help message
+          print_usage(basename(argv[0]));
+          exit(EXIT_SUCCESS);
+          break;
+      case '?':
+        // Handle unknown or missing options
+        fprintf(stderr, "Unknown option: %s\n", argv[optind - 1]);
+        print_usage(basename(argv[0]));
+        exit(EXIT_FAILURE);
+        break;
     }
   }
 
-  if (argc != 3) {
-    printf("Usage: %s <interface> <filename>\n", basename(argv[0]));
-    printf("       %s --version\n", basename(argv[0]));
-    return EXIT_FAILURE;
+  if (version_flag) {
+    printf("%s version %s\n", basename(argv[0]), VERSION);
+    exit(EXIT_SUCCESS);
   }
 
-  int if_index = if_nametoindex(argv[1]);
-  char *file = argv[2];
+  if (optind + 2 != argc) {
+    print_usage(basename(argv[0]));
+    exit(EXIT_FAILURE);
+  }
+
+  int if_index = if_nametoindex(argv[optind]);
+  char *file = argv[optind + 1];
 
   socket = nl_socket_alloc();
   if (!socket) {
@@ -301,10 +350,11 @@ int main(int argc, char *argv[]) {
     return -1;
   }
 
-  while (1) {
+  int n = 0;
+  while ((count == 0) || (n < count)) {
 
     // Trigger scan and wait for it to finish
-    int err = do_scan_trigger(socket, if_index, genl_id);
+    int err = do_scan_trigger(socket, if_index, genl_id, passive_flag);
     if (err != 0) {
       // Errors -16 (-EBUSY), -25 (-ENOTTY), or -33 (-EDOM)
       // can happen for various reasons when doing a scan
@@ -349,6 +399,7 @@ int main(int argc, char *argv[]) {
     }
 
     pcap_dump_flush(dumper);
+    n++;
   }
 
   pcap_dump_close(dumper);
