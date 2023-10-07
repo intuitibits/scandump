@@ -23,15 +23,20 @@ sudo make install
 ## Usage
 
 ```shell
-Usage: scandump <interface> <filename>
-       scandump --version
+Usage: scandump [-c count] [-f frequency-list] [-p] [-h] [--version] <interface> <filename>
+Options:
+  -c, --count         Exit after the specified number of scans
+  -f, --frequency     Comma-separated list of frequencies in MHz to scan
+  -p, --passive       Use passive scan mode
+  -h, --help          Display this help message
+  --version           Show version
 ```
 
 Where `<interface>` is the name of the WLAN interface (e.g. `wlan0`), and `<filename>` is the name of the PCAP file to be generated. Standard output is used if filename is `-`.
 
 The command must be run as root since only privileged processes can initiate a scan.
 
-## Example
+## Examples
 
 Scan for Wi-Fi networks on `wlan0` and save the scan results to `scan.pcap`:
 ```console
@@ -41,4 +46,14 @@ $ sudo scandump wlan0 scan.pcap
 Scan for Wi-Fi networks on `wlan0` and output the scan results to standard output in PCAP format:
 ```console
 $ sudo scandump wlan0 -
+```
+
+Scan for Wi-Fi networks on `wlan0` using channels 1 (2.4 GHz) and 36 (5 GHz) only:
+```console
+$ sudo scandump -f 2412,5180 wlan0 scan.pcap
+```
+
+Scan for Wi-Fi networks on `wlan0` passively (don't transmit probe requests):
+```console
+$ sudo scandump --passive wlan0 scan.pcap
 ```
