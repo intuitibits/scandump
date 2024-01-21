@@ -11,7 +11,7 @@ With **scandump**, no more scraping is needed. As an additional benefit, you can
 ```shell
 # Install pre-requisites
 sudo apt update
-sudo apt install git libnl-genl-3-dev libpcap-dev
+sudo apt install git build-essential libnl-genl-3-dev libpcap-dev
 
 # Download, build, and install scandump
 git clone https://github.com/intuitibits/scandump.git
