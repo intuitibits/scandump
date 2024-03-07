@@ -1,5 +1,5 @@
 /*
-** Copyright (c) 2023 Intuitibits LLC
+** Copyright (c) 2024 Intuitibits LLC
 ** Author: Adrian Granados <adrian@intuitibits.com>
 */
 
@@ -20,7 +20,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 
-#define VERSION "2.0"
+#define VERSION "2.1"
 
 #define NL80211_GENL_FAMILY_NAME "nl80211"
 #define NL80211_GENL_GROUP_NAME "scan"
@@ -40,8 +40,8 @@ struct trigger_results {
 
 static const uint8_t packet_header[] = {
     // Radiotap header
-    0x00, 0x00, 0x0d, 0x00, 0x28, 0x00, 0x00, 0x00, 0xff, 0xff, 0x00, 0xff,
-    0xff,
+    0x00, 0x00, 0x0f, 0x00, 0x2a, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0xff, 0xff, 0x00, 0xff, 0xff,
     // 802.11 frame header
     0x80, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00,
@@ -128,8 +128,8 @@ static int callback_dump(struct nl_msg *msg, void *arg) {
 
   // Channel frequency
   uint16_t freq = nla_get_u32(bss[NL80211_BSS_FREQUENCY]);
-  packet[8] = freq & 0xFF;
-  packet[9] = (freq >> 8) & 0xFF;
+  packet[10] = freq & 0xFF;
+  packet[11] = (freq >> 8) & 0xFF;
 
   // Channel flags
   uint16_t channel_flags = 0x0000;
@@ -139,33 +139,33 @@ static int callback_dump(struct nl_msg *msg, void *arg) {
     channel_flags = 0x0100;
   }
 
-  packet[10] = channel_flags & 0xFF;
-  packet[11] = (channel_flags >> 8) & 0xFF;
+  packet[12] = channel_flags & 0xFF;
+  packet[13] = (channel_flags >> 8) & 0xFF;
 
   // RSSI
   int rssi = (int)nla_get_u32(bss[NL80211_BSS_SIGNAL_MBM]) / 100;
-  packet[12] = rssi & 0xFF;
+  packet[14] = rssi & 0xFF;
 
   // Transmitter address and BSSID
   u_char *bssid = nla_data(bss[NL80211_BSS_BSSID]);
-  memcpy(&packet[23], bssid, nla_len(bss[NL80211_BSS_BSSID]));
-  memcpy(&packet[29], bssid, nla_len(bss[NL80211_BSS_BSSID]));
+  memcpy(&packet[25], bssid, nla_len(bss[NL80211_BSS_BSSID]));
+  memcpy(&packet[31], bssid, nla_len(bss[NL80211_BSS_BSSID]));
 
   // Beacon TSF
   uint64_t beacon_tsf = nla_get_u64(bss[NL80211_BSS_TSF]);
   for (int i = 0; i < 8; i++) {
-    packet[37 + i] = (beacon_tsf >> (i * 8)) & 0xFF;
+    packet[39 + i] = (beacon_tsf >> (i * 8)) & 0xFF;
   }
 
   // Beacon interval
   uint16_t beacon_int = nla_get_u16(bss[NL80211_BSS_BEACON_INTERVAL]);
-  packet[45] = beacon_int & 0xFF;
-  packet[46] = (beacon_int >> 8) & 0xFF;
+  packet[47] = beacon_int & 0xFF;
+  packet[48] = (beacon_int >> 8) & 0xFF;
 
   // Beacon capability
   uint16_t beacon_cap = nla_get_u16(bss[NL80211_BSS_CAPABILITY]);
-  packet[47] = beacon_cap & 0xFF;
-  packet[48] = (beacon_cap >> 8) & 0xFF;
+  packet[49] = beacon_cap & 0xFF;
+  packet[50] = (beacon_cap >> 8) & 0xFF;
 
   // IEs
   u_char *ie_data = nla_data(bss[NL80211_BSS_INFORMATION_ELEMENTS]);
