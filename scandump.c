@@ -20,7 +20,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 
-#define VERSION "2.1"
+#define VERSION "2.1.1"
 
 #define NL80211_GENL_FAMILY_NAME "nl80211"
 #define NL80211_GENL_GROUP_NAME "scan"
@@ -134,9 +134,11 @@ static int callback_dump(struct nl_msg *msg, void *arg) {
   // Channel flags
   uint16_t channel_flags = 0x0000;
   if (freq >= 2412 && freq <= 2484) {
-    channel_flags = 0x0080;
-  } else if (freq >= 5150 && freq <= 5925) {
-    channel_flags = 0x0100;
+    channel_flags = 0x0480;
+  } else if (freq >= 5180 && freq < 5885) {
+    channel_flags = 0x0140;
+  } else if (freq >= 5955 && freq <= 7115) {
+    channel_flags = 0x0040;
   }
 
   packet[12] = channel_flags & 0xFF;
