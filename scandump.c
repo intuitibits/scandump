@@ -20,7 +20,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 
-#define VERSION "2.1.2"
+#define VERSION "2.1.3"
 
 #define NL80211_GENL_FAMILY_NAME "nl80211"
 #define NL80211_GENL_GROUP_NAME "scan"
@@ -256,13 +256,13 @@ int do_scan_trigger(struct nl_sock *socket, int if_index, int genl_id, int passi
         cb); // First wait for ack_handler(). This helps with basic errors.
   if (ret < 0) {
     fprintf(stderr, "nl80211: %s (%d)\n", nl_geterror(-ret), err);
-    return err;
   }
-
-  while (!results.done)
-    nl_recvmsgs(socket, cb);
-  if (results.aborted) {
-    fprintf(stderr, "nl80211: scan aborted\n");
+  else {
+    while (!results.done)
+      nl_recvmsgs(socket, cb);
+    if (results.aborted) {
+      fprintf(stderr, "nl80211: scan aborted\n");
+    }
   }
 
   // Cleanup
