@@ -20,7 +20,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 
-#define VERSION "2.1.1"
+#define VERSION "2.1.2"
 
 #define NL80211_GENL_FAMILY_NAME "nl80211"
 #define NL80211_GENL_GROUP_NAME "scan"
@@ -203,13 +203,13 @@ int do_scan_trigger(struct nl_sock *socket, int if_index, int genl_id, int passi
   // Allocate the message and callback handler.
   msg = nlmsg_alloc();
   if (!msg) {
-    fprintf(stderr, "command failed: failed to allocate netlink message\n");
+    fprintf(stderr, "nl80211: failed to allocate netlink message\n");
     return -ENOMEM;
   }
 
   cb = nl_cb_alloc(NL_CB_DEFAULT);
   if (!cb) {
-    fprintf(stderr, "command failed: failed to allocate netlink callback\n");
+    fprintf(stderr, "nl80211: failed to allocate netlink callback\n");
     nlmsg_free(msg);
     return -ENOMEM;
   }
@@ -255,15 +255,14 @@ int do_scan_trigger(struct nl_sock *socket, int if_index, int genl_id, int passi
         socket,
         cb); // First wait for ack_handler(). This helps with basic errors.
   if (ret < 0) {
-    fprintf(stderr, "command failed: %s (%d)\n", nl_geterror(-ret), err);
+    fprintf(stderr, "nl80211: %s (%d)\n", nl_geterror(-ret), err);
     return err;
   }
 
   while (!results.done)
     nl_recvmsgs(socket, cb);
   if (results.aborted) {
-    fprintf(stderr, "command failed: scan aborted\n");
-    return 1;
+    fprintf(stderr, "nl80211: scan aborted\n");
   }
 
   // Cleanup
@@ -376,20 +375,20 @@ int main(int argc, char *argv[]) {
 
   socket = nl_socket_alloc();
   if (!socket) {
-    fprintf(stderr, "command failed: %s (%d)\n", strerror(errno), errno);
+    fprintf(stderr, "nl80211: %s (%d)\n", strerror(errno), errno);
     return -1;
   }
 
   err = genl_connect(socket);
   if (err < 0) {
-    fprintf(stderr, "command failed: %s (%d)\n", nl_geterror(err), err);
+    fprintf(stderr, "nl80211: %s (%d)\n", nl_geterror(err), err);
     nl_socket_free(socket);
     return -1;
   }
 
   int genl_id = genl_ctrl_resolve(socket, NL80211_GENL_FAMILY_NAME);
   if (genl_id < 0) {
-    fprintf(stderr, "command failed: %s (%d)\n", nl_geterror(genl_id), genl_id);
+    fprintf(stderr, "nl80211: %s (%d)\n", nl_geterror(genl_id), genl_id);
     nl_socket_free(socket);
     return -1;
   }
@@ -397,7 +396,7 @@ int main(int argc, char *argv[]) {
   // Create pcap handle
   handle = pcap_open_dead(linktype, snaplen);
   if (!handle) {
-    fprintf(stderr, "command failed: error creating pcap handle\n");
+    fprintf(stderr, "libpcap: error creating pcap handle\n");
     nl_socket_free(socket);
     return -1;
   }
@@ -430,7 +429,7 @@ int main(int argc, char *argv[]) {
       }
 
       if (!dumper) {
-        fprintf(stderr, "command failed: %s\n", pcap_geterr(handle));
+        fprintf(stderr, "libpcap: %s\n", pcap_geterr(handle));
         pcap_close(handle);
         nl_socket_free(socket);
         return -1;
