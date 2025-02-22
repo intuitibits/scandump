@@ -20,7 +20,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 
-#define VERSION "2.1.3"
+#define VERSION "2.1.4"
 
 #define NL80211_GENL_FAMILY_NAME "nl80211"
 #define NL80211_GENL_GROUP_NAME "scan"
@@ -118,10 +118,16 @@ static int callback_dump(struct nl_msg *msg, void *arg) {
     return NL_SKIP;
   }
 
-  if (!bss[NL80211_BSS_BSSID])
+  if (!bss[NL80211_BSS_BSSID] ||
+      !bss[NL80211_BSS_FREQUENCY] ||
+      !bss[NL80211_BSS_SIGNAL_MBM] ||
+      !bss[NL80211_BSS_TSF] ||
+      !bss[NL80211_BSS_BEACON_INTERVAL] ||
+      !bss[NL80211_BSS_CAPABILITY] ||
+      !bss[NL80211_BSS_INFORMATION_ELEMENTS])
+  {
     return NL_SKIP;
-  if (!bss[NL80211_BSS_INFORMATION_ELEMENTS])
-    return NL_SKIP;
+  }
 
   // Prepare packet with radiotap and beacon headers.
   memcpy(packet, packet_header, PACKET_HEADER_LEN);
