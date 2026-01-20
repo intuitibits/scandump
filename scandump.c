@@ -20,7 +20,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 
-#define VERSION "2.1.4"
+#define VERSION "2.1.5"
 
 #define NL80211_GENL_FAMILY_NAME "nl80211"
 #define NL80211_GENL_GROUP_NAME "scan"
