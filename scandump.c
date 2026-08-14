@@ -571,11 +571,14 @@ static void print_usage(const char *program_name)
   printf("  --version           Show version\n");
 }
 
-// Opens the output file for writing, refusing to follow a symlink at the
-// final path component and keeping the scan results owner-readable only.
+// Opens the output file for writing. The mode matches what tcpdump and
+// pcap_dump_open() produce -- 0666 as masked by the caller's umask, so a
+// root run under sudo's usual 022 umask yields 0644 -- but the open refuses
+// to follow a symlink at the final path component, so a pre-planted symlink
+// at a predictable output path cannot redirect a root write elsewhere.
 static FILE *open_output_file(const char *file) {
 
-  int fd = open(file, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);
+  int fd = open(file, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0666);
   if (fd < 0) {
     fprintf(stderr, "%s: %s\n", file, strerror(errno));
     return NULL;

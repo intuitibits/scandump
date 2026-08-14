@@ -10,8 +10,8 @@ scandump (2.2.0) unstable; urgency=medium
     error retry loop.
   * Reject invalid, out-of-range and duplicate values for -c and -f, and
     report a clear error for an unknown interface name.
-  * Create output files with mode 0600 and refuse to follow a symlink at
-    the output path.
+  * Refuse to follow a symlink at the output path. File permissions are
+    unchanged, matching tcpdump (0666 as masked by umask).
   * Build with -O2 and honor the environment's CFLAGS/CPPFLAGS/LDFLAGS so
     the package build's hardening flags are applied.
 
