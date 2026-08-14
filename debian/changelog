@@ -1,3 +1,22 @@
+scandump (2.2.0) unstable; urgency=medium
+
+  * Fix an indefinite wait when the kernel rejects the scan trigger (e.g.
+    -EBUSY while another process is scanning) instead of retrying.
+  * Add a receive timeout and SIGINT/SIGTERM handling so a stuck driver or
+    Ctrl-C can no longer hang the process.
+  * Validate the BSSID attribute length before copying it into the packet
+    buffer.
+  * Check the previously-unchecked netlink calls and bound the transient
+    error retry loop.
+  * Reject invalid, out-of-range and duplicate values for -c and -f, and
+    report a clear error for an unknown interface name.
+  * Create output files with mode 0600 and refuse to follow a symlink at
+    the output path.
+  * Build with -O2 and honor the environment's CFLAGS/CPPFLAGS/LDFLAGS so
+    the package build's hardening flags are applied.
+
+ -- Adrian Granados <adrian@intuitibits.com>  Fri, 14 Aug 2026 16:55:32 +0000
+
 scandump (1.0.4) unstable; urgency=medium
 
   * Initial release.
