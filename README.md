@@ -36,6 +36,14 @@ Where `<interface>` is the name of the WLAN interface (e.g. `wlan0`), and `<file
 
 The command must be run as root since only privileged processes can initiate a scan.
 
+Triggering a scan actually requires only the `CAP_NET_ADMIN` capability rather than full root. Deployments that prefer to avoid running the tool as root can grant just that capability to the binary instead:
+
+```shell
+sudo setcap cap_net_admin+ep /usr/bin/scandump
+```
+
+**scandump** can then be run by an unprivileged user. Note that the output file is created with the privileges of the calling user in that case, and that some drivers or setups may still need more than `CAP_NET_ADMIN`, so test this before relying on it.
+
 ## Examples
 
 Scan for Wi-Fi networks on `wlan0` and save the scan results to `scan.pcap`:
