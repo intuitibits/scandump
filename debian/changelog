@@ -1,3 +1,10 @@
+scandump (2.2.1) unstable; urgency=medium
+
+  * Ignore scan events for other interfaces so a scan started by another
+    process (e.g. wpa_supplicant) is no longer reported as an aborted scan.
+
+ -- Adrian Granados <adrian@intuitibits.com>  Fri, 14 Aug 2026 20:55:10 +0000
+
 scandump (2.2.0) unstable; urgency=medium
 
   * Fix an indefinite wait when the kernel rejects the scan trigger (e.g.

@@ -25,7 +25,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 
-#define VERSION "2.2.0"
+#define VERSION "2.2.1"
 
 #define NL80211_GENL_FAMILY_NAME "nl80211"
 #define NL80211_GENL_GROUP_NAME "scan"
@@ -173,6 +173,7 @@ static size_t compute_ie_payload_len(size_t ie_len, size_t max_packet_size,
 struct trigger_results {
   int done;
   int aborted;
+  int if_index;
 };
 
 // Set from SIGINT/SIGTERM to request a clean shutdown.
@@ -266,6 +267,21 @@ static int callback_trigger(struct nl_msg *msg, void *arg) {
 
   struct genlmsghdr *gnlh = nlmsg_data(nlmsg_hdr(msg));
   struct trigger_results *results = arg;
+  struct nlattr *tb[NL80211_ATTR_MAX + 1];
+
+  // The "scan" multicast group carries events for every wireless interface on
+  // the system, including scans started by other processes such as
+  // wpa_supplicant. Ignore anything that isn't for our interface, otherwise a
+  // foreign scan's event ends our wait early and is reported as ours.
+  if (nla_parse(tb, NL80211_ATTR_MAX, genlmsg_attrdata(gnlh, 0),
+                genlmsg_attrlen(gnlh, 0), NULL) < 0) {
+    return NL_SKIP;
+  }
+
+  if (!tb[NL80211_ATTR_IFINDEX] ||
+      (int)nla_get_u32(tb[NL80211_ATTR_IFINDEX]) != results->if_index) {
+    return NL_SKIP;
+  }
 
   if (gnlh->cmd == NL80211_CMD_SCAN_ABORTED) {
     results->done = 1;
@@ -397,7 +413,8 @@ static int do_scan_trigger(struct nl_sock *sk, int if_index, int genl_id,
   // Starts the scan and waits for it to finish.
   // Does not return until the scan is done, has been aborted, has failed,
   // has timed out, or a stop signal was received.
-  struct trigger_results results = {.done = 0, .aborted = 0};
+  struct trigger_results results = {.done = 0, .aborted = 0,
+                                    .if_index = if_index};
   struct nl_msg *msg = NULL;
   struct nl_cb *cb = NULL;
   struct nlattr *nest = NULL;
