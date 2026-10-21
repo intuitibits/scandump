@@ -1,0 +1,75 @@
+# End-to-end scan tests against simulated radios (mac80211_hwsim): one radio
+# runs a hostapd access point, the other is scanned with scandump. No real
+# Wi-Fi hardware is needed, but the runner's kernel must provide the hwsim
+# module, so this is kept apart from the build and packaging checks in
+# ci.yml. It runs on pull requests that change the scanner, and on demand.
+name: Functional tests (hwsim)
+
+on:
+  pull_request:
+    paths:
+      - scandump.c
+      - Makefile
+      - .github/workflows/functional.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  hwsim:
+    runs-on: ubuntu-latest
+    env:
+      SSID: scandump-ci
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends \
+            pkgconf libnl-3-dev libnl-genl-3-dev libpcap-dev \
+            hostapd iw tcpdump libcap2-bin
+      - run: make
+      - name: Create two virtual radios and an access point
+        run: |
+          # The module is in linux-modules-extra on some runner kernels and
+          # in the base modules on others; that package doesn't exist for
+          # every kernel, so only install it if the module is missing.
+          if ! modinfo mac80211_hwsim > /dev/null 2>&1; then
+            sudo apt-get install -y -q --no-install-recommends \
+              "linux-modules-extra-$(uname -r)"
+          fi
+          sudo modprobe mac80211_hwsim radios=2
+          iw dev
+          printf '%s\n' interface=wlan0 driver=nl80211 "ssid=$SSID" \
+            hw_mode=g channel=6 > "$RUNNER_TEMP/hostapd.conf"
+          sudo hostapd -B "$RUNNER_TEMP/hostapd.conf"
+          sudo ip link set wlan1 up
+          sleep 2
+      - name: Active scan to a file
+        run: |
+          sudo ./scandump -c 1 wlan1 active.pcap
+          tcpdump -nn -e -r active.pcap | tee active.txt
+          grep -q "Beacon ($SSID)" active.txt
+      - name: Frequency-restricted scan
+        run: |
+          sudo ./scandump -c 1 -f 2437 wlan1 freq.pcap
+          tcpdump -nn -r freq.pcap | grep -q "Beacon ($SSID)"
+      - name: Passive scan
+        run: |
+          sudo ./scandump -c 1 --passive wlan1 passive.pcap
+          tcpdump -nn -r passive.pcap | grep -q "Beacon ($SSID)"
+      - name: Stream to standard output
+        run: sudo ./scandump -c 1 wlan1 - | tcpdump -nn -r - | grep -q "Beacon ($SSID)"
+      - name: Without privileges the scan is refused
+        run: |
+          if ./scandump -c 1 wlan1 denied.pcap 2> denied.err; then exit 1; fi
+          cat denied.err
+          grep -q 'Operation not permitted' denied.err
+          test ! -e denied.pcap
+      - name: CAP_NET_ADMIN file capability is enough
+        run: |
+          sudo setcap cap_net_admin+ep ./scandump
+          ./scandump -c 1 wlan1 cap.pcap
+          test "$(stat -c %U cap.pcap)" = "$(id -un)"
+          tcpdump -nn -r cap.pcap | grep -q "Beacon ($SSID)"

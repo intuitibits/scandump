@@ -1,0 +1,184 @@
+.\" Copyright (c) 2023-2026 Intuitibits LLC
+.\" SPDX-License-Identifier: GPL-3.0-only
+.TH SCANDUMP 8 2026-10-20 "scandump 2.3.0" "System Administration Commands"
+.SH NAME
+scandump \- scan for Wi\-Fi networks and write the results in PCAP format
+.SH SYNOPSIS
+.B scandump
+.RB [ \-c
+.IR count ]
+.RB [ \-f
+.IR frequency\-list ]
+.RB [ \-p ]
+.I interface
+.I filename
+.br
+.B scandump
+.B \-h
+|
+.B \-V
+.SH DESCRIPTION
+.B scandump
+triggers a Wi\-Fi scan on
+.I interface
+through the Linux 802.11 netlink API (nl80211) and writes every network
+(BSS) the kernel reports as a synthetic radiotap + IEEE 802.11 beacon
+frame to
+.IR filename ,
+a PCAP file with link type
+.BR DLT_IEEE802_11_RADIO .
+If
+.I filename
+is
+.BR \- ,
+the PCAP stream is written to standard output and flushed after each scan.
+.PP
+Each frame carries the BSSID, channel frequency and band, signal strength,
+beacon timestamp (TSF), beacon interval, capability information and the
+information elements reported by the driver.
+The interface does not need to support monitor mode, and the output can be
+read with any PCAP\-aware tool, such as
+.BR tcpdump (8)
+or Wireshark, instead of parsing the text output of
+.BR iw (8).
+.PP
+By default
+.B scandump
+scans repeatedly until it is interrupted with
+.B SIGINT
+or
+.BR SIGTERM ,
+at which point the output file is closed cleanly.
+The output file is created only after the first scan succeeds.
+.SH OPTIONS
+.TP
+.BR \-c ", " \-\-count " \fIcount\fR"
+Exit after
+.I count
+scans.
+A count of 0 (the default) scans until interrupted.
+.TP
+.BR \-f ", " \-\-frequency " \fIfrequency\-list\fR"
+Restrict the scan to a comma\-separated list of center frequencies in MHz,
+for example
+.BR 2412,5180 .
+Up to 100 distinct frequencies may be given.
+.TP
+.BR \-p ", " \-\-passive
+Perform a passive scan: listen for beacons without transmitting probe
+requests.
+The default is an active (wildcard SSID) scan.
+.TP
+.BR \-h ", " \-\-help
+Print a usage summary and exit.
+.TP
+.BR \-V ", " \-\-version
+Print the version and exit.
+.SH PRIVILEGES
+Triggering a scan requires the
+.B CAP_NET_ADMIN
+capability; reading scan results does not.
+Run
+.B scandump
+as root (for example with
+.BR sudo (8)),
+or grant the capability to the binary:
+.PP
+.RS
+.B setcap cap_net_admin+ep /usr/bin/scandump
+.RE
+.PP
+With a file capability, any local user can trigger scans and the output
+file is created with the calling user's privileges.
+Installing the package grants no privileges by itself.
+.PP
+When run as root,
+.B scandump
+writes to whatever path it is given, so do not grant passwordless
+.BR sudo (8)
+access to it for users who should not be able to overwrite files as root.
+An example sudoers rule is shipped with the documentation for deployments
+that accept this.
+.PP
+Without the required privilege the scan request fails with
+.B Operation not permitted
+and
+.B scandump
+exits with a non\-zero status.
+.SH EXIT STATUS
+Transient scan failures (for example, the interface is busy because another
+process is scanning) are retried every 2 seconds, up to 30 times in a row.
+.TP
+.B 0
+The requested number of scans completed, or
+.B scandump
+was interrupted.
+.TP
+.B 1
+Invalid arguments, or no interface with the given name.
+.TP
+.B 240
+The scan kept failing transiently (the interface stayed busy, or the
+driver did not respond) and
+.B scandump
+gave up.
+.TP
+.B 255
+Any other error, such as an output file that cannot be created or written.
+.TP
+.I "256 \- N"
+A scan failed with netlink error
+.IR N ,
+the number shown in parentheses in the error message.
+For example, 225 (\(lqNo such device (\-31)\(rq) means the interface does
+not support nl80211, and 228 (\(lqOperation not permitted (\-28)\(rq)
+means scandump lacks
+.BR CAP_NET_ADMIN .
+.SH EXAMPLES
+Scan on
+.B wlan0
+and save the results to
+.BR scan.pcap :
+.PP
+.RS
+.B sudo scandump wlan0 scan.pcap
+.RE
+.PP
+Stream a single scan to
+.BR tcpdump (8):
+.PP
+.RS
+.B sudo scandump \-c 1 wlan0 \- | tcpdump \-r \- \-e
+.RE
+.PP
+Scan only channels 1 (2.4 GHz) and 36 (5 GHz):
+.PP
+.RS
+.B sudo scandump \-f 2412,5180 wlan0 scan.pcap
+.RE
+.PP
+Scan passively, five times:
+.PP
+.RS
+.B sudo scandump \-\-passive \-c 5 wlan0 scan.pcap
+.RE
+.SH NOTES
+.B scandump
+requires a Linux kernel with nl80211 (cfg80211) support and a wireless
+driver that implements scanning through it.
+Scan results are synthesized from the kernel's BSS table, not captured
+over the air: information elements longer than the 2048\-byte frame buffer
+are truncated, and the original frame length is recorded in the PCAP
+record header.
+.SH SEE ALSO
+.BR iw (8),
+.BR tcpdump (8),
+.BR pcap (3PCAP),
+.BR capabilities (7),
+.BR setcap (8)
+.SH AUTHOR
+Adrian Granados.
+Copyright \(co 2023\-2026 Intuitibits LLC.
+Licensed under the GNU General Public License, version 3.
+.PP
+Project page: https://github.com/intuitibits/scandump

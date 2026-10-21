@@ -54,3 +54,8 @@ debhelper-build-stamp
 *.substvars
 debian/files
 debian/scandump
+
+# Build and packaging outputs
+/scandump_asan
+/scandump-*.tar.gz
+/out/

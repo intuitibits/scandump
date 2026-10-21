@@ -1,6 +1,7 @@
 /*
-** Copyright (c) 2024 Intuitibits LLC
+** Copyright (c) 2023-2026 Intuitibits LLC
 ** Author: Adrian Granados <adrian@intuitibits.com>
+** SPDX-License-Identifier: GPL-3.0-only
 */
 
 #define _GNU_SOURCE
@@ -25,7 +26,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 
-#define VERSION "2.2.1"
+#define VERSION "2.3.0"
 
 #define NL80211_GENL_FAMILY_NAME "nl80211"
 #define NL80211_GENL_GROUP_NAME "scan"
@@ -41,6 +42,15 @@
 // Consecutive transient trigger failures tolerated before giving up
 // (2 seconds apart, so roughly a minute of retrying).
 #define MAX_TRANSIENT_RETRIES 30
+
+// Exit statuses, besides 0 and EXIT_FAILURE (1, invalid arguments or an
+// unknown interface name). A scan failure that is not transient exits with
+// 256 minus its error code (see exit_status_for_error()), e.g. 225 for
+// NLE_NODEV (not a wireless interface) or 228 for NLE_PERM (no
+// CAP_NET_ADMIN). Callers such as remote-sensor scripts depend on these
+// values, so they are documented in scandump(8) and must not change.
+#define EXIT_BUSY 240          // gave up after MAX_TRANSIENT_RETRIES
+#define EXIT_RUNTIME_ERROR 255 // any other failure
 
 // Length of a BSSID (an 802.11 MAC address), in bytes.
 #define SCANDUMP_BSSID_LEN 6
@@ -125,6 +135,18 @@ static int parse_frequency_list(char *list, int *freqs, int max_freqs,
 
   *num_freqs_out = num_freqs;
   return 0;
+}
+
+// Exit status for a fatal error from do_scan_trigger(): a negative libnl
+// code (-NLE_*) or errno, mapped to 256 + err, which is what returning the
+// error from main() has always produced.
+static int exit_status_for_error(int err) {
+
+  if (err < 0 && err > -256) {
+    return 256 + err;
+  }
+
+  return EXIT_RUNTIME_ERROR;
 }
 
 // Radiotap channel flags for a given center frequency (MHz). Returns 0 for
@@ -268,13 +290,17 @@ static int callback_trigger(struct nl_msg *msg, void *arg) {
   struct genlmsghdr *gnlh = nlmsg_data(nlmsg_hdr(msg));
   struct trigger_results *results = arg;
   struct nlattr *tb[NL80211_ATTR_MAX + 1];
+  static struct nla_policy trigger_policy[NL80211_ATTR_MAX + 1] = {
+      [NL80211_ATTR_IFINDEX] = {.type = NLA_U32},
+  };
 
   // The "scan" multicast group carries events for every wireless interface on
   // the system, including scans started by other processes such as
   // wpa_supplicant. Ignore anything that isn't for our interface, otherwise a
-  // foreign scan's event ends our wait early and is reported as ours.
+  // foreign scan's event ends our wait early and is reported as ours. The
+  // policy makes the parse reject an interface index too short to be a u32.
   if (nla_parse(tb, NL80211_ATTR_MAX, genlmsg_attrdata(gnlh, 0),
-                genlmsg_attrlen(gnlh, 0), NULL) < 0) {
+                genlmsg_attrlen(gnlh, 0), trigger_policy) < 0) {
     return NL_SKIP;
   }
 
@@ -540,9 +566,12 @@ static int do_scan_trigger(struct nl_sock *sk, int if_index, int genl_id,
   // Check err explicitly rather than relying on nl_recvmsgs()'s return value:
   // waiting for scan results after a NACK (e.g. -EBUSY when another process
   // is already scanning) would wait forever, since no scan was started.
+  // nl_recvmsgs() normally reports a NACK itself, as a libnl error code, so
+  // this only runs if it didn't; convert err (a raw -errno from the kernel)
+  // so callers see a libnl code either way.
   if (err < 0) {
-    fprintf(stderr, "nl80211: %s (%d)\n", strerror(-err), err);
-    ret = err;
+    ret = -nl_syserr2nlerr(err);
+    fprintf(stderr, "nl80211: %s (%d)\n", nl_geterror(ret), ret);
     goto cleanup;
   }
 
@@ -577,15 +606,20 @@ cleanup:
   return ret;
 }
 
-static void print_usage(const char *program_name)
+// Prints the usage summary to `out`: stdout when it was asked for with -h,
+// stderr when it accompanies an error, so it never mixes into a PCAP stream
+// written to stdout.
+static void print_usage(FILE *out, const char *program_name)
 {
-  printf("Usage: %s [-c count] [-f frequency-list] [-p] [-h] [--version] <interface> <filename>\n", program_name);
-  printf("Options:\n");
-  printf("  -c, --count         Exit after the specified number of scans\n");
-  printf("  -f, --frequency     Comma-separated list of frequencies in MHz to scan\n");
-  printf("  -p, --passive       Use passive scan mode\n");
-  printf("  -h, --help          Display this help message\n");
-  printf("  --version           Show version\n");
+  fprintf(out, "Usage: %s [-c count] [-f frequency-list] [-p] [-h] [-V] <interface> <filename>\n", program_name);
+  fprintf(out, "Options:\n");
+  fprintf(out, "  -c, --count         Exit after the specified number of scans\n");
+  fprintf(out, "                      (default 0: scan until interrupted)\n");
+  fprintf(out, "  -f, --frequency     Comma-separated list of frequencies in MHz to scan\n");
+  fprintf(out, "  -p, --passive       Use passive scan mode\n");
+  fprintf(out, "  -h, --help          Display this help message\n");
+  fprintf(out, "  -V, --version       Show version\n");
+  fprintf(out, "Use - as <filename> to write to standard output.\n");
 }
 
 // Opens the output file for writing. The mode matches what tcpdump and
@@ -611,6 +645,25 @@ static FILE *open_output_file(const char *file) {
   return fp;
 }
 
+// Reports whether everything written to the output so far reached it.
+// pcap_dump() cannot report errors and pcap_dump_close() returns nothing, so
+// a full disk or a closed pipe is only noticed through the stream's error
+// flag. With `flush`, buffered packets are written out first, so the check
+// covers them too. Returns 0 on success; prints a diagnostic and returns -1
+// on failure.
+static int check_output(pcap_dumper_t *dumper, const char *name, int flush) {
+
+  errno = 0;
+  if ((!flush || pcap_dump_flush(dumper) == 0) &&
+      !ferror(pcap_dump_file(dumper))) {
+    return 0;
+  }
+
+  fprintf(stderr, "%s: %s\n", name,
+          errno != 0 ? strerror(errno) : "write error");
+  return -1;
+}
+
 int main(int argc, char *argv[]) {
 
   struct nl_sock *sk = NULL;
@@ -632,11 +685,11 @@ int main(int argc, char *argv[]) {
     {"frequency", required_argument, 0, 'f'},
     {"passive", no_argument, 0, 'p'},
     {"help", no_argument, 0, 'h'},
-    {"version", no_argument, &version_flag, 1},
+    {"version", no_argument, 0, 'V'},
     {0, 0, 0, 0}
   };
 
-  while ((opt = getopt_long(argc, argv, "c:f:ph", long_options, NULL)) != -1) {
+  while ((opt = getopt_long(argc, argv, "c:f:phV", long_options, NULL)) != -1) {
     switch (opt) {
       case 'c': {
         long value;
@@ -653,21 +706,26 @@ int main(int argc, char *argv[]) {
       case 'p':
         use_passive = 1;
         break;
+      case 'V':
+        version_flag = 1;
+        break;
       case 'h':
           // Display help message
-          print_usage(basename(argv[0]));
+          print_usage(stdout, basename(argv[0]));
           exit(EXIT_SUCCESS);
           break;
       case '?':
         // Handle unknown or missing options
-        print_usage(basename(argv[0]));
+        print_usage(stderr, basename(argv[0]));
         exit(EXIT_FAILURE);
         break;
     }
   }
 
+  // A fixed name, so the output doesn't depend on how scandump was invoked
+  // (e.g. through a renamed symlink); scripts and packaging tests match it.
   if (version_flag) {
-    printf("%s version %s\n", basename(argv[0]), VERSION);
+    printf("scandump version %s\n", VERSION);
     exit(EXIT_SUCCESS);
   }
 
@@ -680,7 +738,7 @@ int main(int argc, char *argv[]) {
 
   // Process interface and filename arguments
   if (optind + 2 != argc) {
-    print_usage(basename(argv[0]));
+    print_usage(stderr, basename(argv[0]));
     exit(EXIT_FAILURE);
   }
 
@@ -694,6 +752,7 @@ int main(int argc, char *argv[]) {
 
   char *file = argv[optind + 1];
   int to_stdout = (strcmp(file, "-") == 0);
+  const char *output_name = to_stdout ? "stdout" : file;
 
   // Handle Ctrl-C and SIGTERM so a scan in progress can be interrupted and
   // the output file closed cleanly.
@@ -703,26 +762,26 @@ int main(int argc, char *argv[]) {
   sigemptyset(&sa.sa_mask);
   if (sigaction(SIGINT, &sa, NULL) < 0 || sigaction(SIGTERM, &sa, NULL) < 0) {
     fprintf(stderr, "sigaction: %s\n", strerror(errno));
-    return -1;
+    return EXIT_RUNTIME_ERROR;
   }
 
   sk = nl_socket_alloc();
   if (!sk) {
     fprintf(stderr, "nl80211: %s (%d)\n", strerror(errno), errno);
-    return -1;
+    return EXIT_RUNTIME_ERROR;
   }
 
   err = genl_connect(sk);
   if (err < 0) {
     fprintf(stderr, "nl80211: %s (%d)\n", nl_geterror(err), err);
-    exit_code = -1;
+    exit_code = EXIT_RUNTIME_ERROR;
     goto cleanup;
   }
 
   int genl_id = genl_ctrl_resolve(sk, NL80211_GENL_FAMILY_NAME);
   if (genl_id < 0) {
     fprintf(stderr, "nl80211: %s (%d)\n", nl_geterror(genl_id), genl_id);
-    exit_code = -1;
+    exit_code = EXIT_RUNTIME_ERROR;
     goto cleanup;
   }
 
@@ -730,7 +789,7 @@ int main(int argc, char *argv[]) {
   handle = pcap_open_dead(linktype, snaplen);
   if (!handle) {
     fprintf(stderr, "libpcap: error creating pcap handle\n");
-    exit_code = -1;
+    exit_code = EXIT_RUNTIME_ERROR;
     goto cleanup;
   }
 
@@ -747,16 +806,19 @@ int main(int argc, char *argv[]) {
     }
 
     if (trigger_err != 0) {
-      // Errors -16 (-EBUSY), -25 (-ENOTTY), or -33 (-EDOM)
-      // can happen for various reasons when doing a scan
-      // but we can simply retry. So can a timeout waiting for the kernel.
-      if (trigger_err == -EBUSY || trigger_err == -ENOTTY ||
-          trigger_err == -EDOM || trigger_err == -ETIMEDOUT) {
+      // Netlink failures arrive as libnl codes (-NLE_*), not errno values.
+      // The interface being busy (-NLE_BUSY, -25, the kernel's EBUSY while
+      // another scan runs), an interrupted dump (-NLE_DUMP_INTR, -33) and a
+      // sequence mismatch (-NLE_SEQ_MISMATCH, -16) can happen for various
+      // reasons when doing a scan, but we can simply retry. So can a timeout
+      // waiting for the kernel (-ETIMEDOUT, from poll()).
+      if (trigger_err == -NLE_BUSY || trigger_err == -NLE_DUMP_INTR ||
+          trigger_err == -NLE_SEQ_MISMATCH || trigger_err == -ETIMEDOUT) {
         if (++transient_retries > MAX_TRANSIENT_RETRIES) {
           fprintf(stderr,
                   "nl80211: giving up after %d consecutive transient errors\n",
                   MAX_TRANSIENT_RETRIES);
-          exit_code = -1;
+          exit_code = EXIT_BUSY;
           goto cleanup;
         }
         sleep(2);
@@ -767,7 +829,7 @@ int main(int argc, char *argv[]) {
       }
 
       // Other errors are not expected, so we quit.
-      exit_code = trigger_err;
+      exit_code = exit_status_for_error(trigger_err);
       goto cleanup;
     }
 
@@ -780,7 +842,7 @@ int main(int argc, char *argv[]) {
       } else {
         FILE *fp = open_output_file(file);
         if (!fp) {
-          exit_code = -1;
+          exit_code = EXIT_RUNTIME_ERROR;
           goto cleanup;
         }
         // On failure libpcap closes the stream itself, so it must not be
@@ -790,7 +852,7 @@ int main(int argc, char *argv[]) {
 
       if (!dumper) {
         fprintf(stderr, "libpcap: %s\n", pcap_geterr(handle));
-        exit_code = -1;
+        exit_code = EXIT_RUNTIME_ERROR;
         goto cleanup;
       }
     }
@@ -799,7 +861,7 @@ int main(int argc, char *argv[]) {
     struct nl_msg *msg = nlmsg_alloc();
     if (!msg) {
       fprintf(stderr, "nl80211: failed to allocate netlink message\n");
-      exit_code = -1;
+      exit_code = EXIT_RUNTIME_ERROR;
       goto cleanup;
     }
 
@@ -807,7 +869,7 @@ int main(int argc, char *argv[]) {
                      0)) {
       fprintf(stderr, "nl80211: failed to build scan results request\n");
       nlmsg_free(msg);
-      exit_code = -1;
+      exit_code = EXIT_RUNTIME_ERROR;
       goto cleanup;
     }
 
@@ -815,7 +877,7 @@ int main(int argc, char *argv[]) {
     if (ret < 0) {
       fprintf(stderr, "nl80211: %s (%d)\n", nl_geterror(ret), ret);
       nlmsg_free(msg);
-      exit_code = -1;
+      exit_code = EXIT_RUNTIME_ERROR;
       goto cleanup;
     }
 
@@ -837,9 +899,11 @@ int main(int argc, char *argv[]) {
     nlmsg_free(msg);
 
     // Only flush when streaming to stdout, where a consumer is waiting for
-    // the data; file output is flushed by pcap_dump_close().
-    if (to_stdout) {
-      pcap_dump_flush(dumper);
+    // the data; file output is flushed before it is closed below. Either way,
+    // stop on a write error rather than keep scanning into a broken output.
+    if (check_output(dumper, output_name, to_stdout) < 0) {
+      exit_code = EXIT_RUNTIME_ERROR;
+      goto cleanup;
     }
 
     n++;
@@ -847,6 +911,10 @@ int main(int argc, char *argv[]) {
 
 cleanup:
   if (dumper) {
+    // Skipped after an earlier error, which has been reported already.
+    if (exit_code == 0 && check_output(dumper, output_name, 1) < 0) {
+      exit_code = EXIT_RUNTIME_ERROR;
+    }
     pcap_dump_close(dumper);
   }
   if (handle) {

@@ -1,0 +1,3 @@
+# Keep Debian packaging out of release tarballs (git archive and GitHub's tag
+# archives) so the Debian source package carries it as its own layer.
+/debian export-ignore

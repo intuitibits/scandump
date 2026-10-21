@@ -1,31 +1,5 @@
-scandump (2.2.1) unstable; urgency=medium
-
-  * Ignore scan events for other interfaces so a scan started by another
-    process (e.g. wpa_supplicant) is no longer reported as an aborted scan.
-
- -- Adrian Granados <adrian@intuitibits.com>  Fri, 14 Aug 2026 20:55:10 +0000
-
-scandump (2.2.0) unstable; urgency=medium
-
-  * Fix an indefinite wait when the kernel rejects the scan trigger (e.g.
-    -EBUSY while another process is scanning) instead of retrying.
-  * Add a receive timeout and SIGINT/SIGTERM handling so a stuck driver or
-    Ctrl-C can no longer hang the process.
-  * Validate the BSSID attribute length before copying it into the packet
-    buffer.
-  * Check the previously-unchecked netlink calls and bound the transient
-    error retry loop.
-  * Reject invalid, out-of-range and duplicate values for -c and -f, and
-    report a clear error for an unknown interface name.
-  * Refuse to follow a symlink at the output path. File permissions are
-    unchanged, matching tcpdump (0666 as masked by umask).
-  * Build with -O2 and honor the environment's CFLAGS/CPPFLAGS/LDFLAGS so
-    the package build's hardening flags are applied.
-
- -- Adrian Granados <adrian@intuitibits.com>  Fri, 14 Aug 2026 16:55:32 +0000
-
-scandump (1.0.4) unstable; urgency=medium
+scandump (2.3.0-1) UNRELEASED; urgency=medium
 
   * Initial release.
 
- -- Adrian Granados <adrian@intuitibits.com>  Fri, 26 May 2023 22:12:00 +0000
+ -- Adrian Granados <support@intuitibits.com>  Tue, 20 Oct 2026 12:00:00 +0000
