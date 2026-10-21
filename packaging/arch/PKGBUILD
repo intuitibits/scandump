@@ -3,7 +3,7 @@
 pkgname=scandump
 pkgver=2.3.0
 pkgrel=1
-pkgdesc='Wi-Fi scanner that writes nl80211 scan results in PCAP format'
+pkgdesc='Command-line utility that writes Wi-Fi scan results in PCAP format'
 arch=('x86_64' 'aarch64' 'armv7h' 'i686')
 url='https://github.com/intuitibits/scandump'
 license=('GPL-3.0-only')
