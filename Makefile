@@ -48,6 +48,9 @@ SRCS = scandump.c
 
 OBJS = $(SRCS:.c=.o)
 
+# Tests that need no wireless hardware; see tests/test_scandump.c.
+TEST = tests/test_scandump
+
 VERSION := $(shell sed -n 's/^.define VERSION "\(.*\)"/\1/p' scandump.c)
 
 ASAN_FLAGS = -fsanitize=address,undefined -g -O1 -fno-omit-frame-pointer
@@ -59,6 +62,13 @@ $(TARGET): $(OBJS)
 
 %.o: %.c
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c $< -o $@
+
+$(TEST): tests/test_scandump.c $(SRCS)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) $< -o $@ $(LDLIBS)
+
+check: $(TARGET) $(TEST)
+	./$(TEST)
+	sh tests/cli.sh ./$(TARGET)
 
 asan: clean
 	$(CC) $(CFLAGS) $(ASAN_FLAGS) $(CPPFLAGS) $(LDFLAGS) $(SRCS) -o $(TARGET)_asan $(LDLIBS)
@@ -78,6 +88,6 @@ dist:
 	  -o $(TARGET)-$(VERSION).tar.gz HEAD
 
 clean:
-	rm -f $(OBJS) $(TARGET) $(TARGET)_asan $(TARGET)-*.tar.gz
+	rm -f $(OBJS) $(TARGET) $(TARGET)_asan $(TARGET)-*.tar.gz $(TEST)
 
-.PHONY: all install uninstall dist clean asan
+.PHONY: all check install uninstall dist clean asan

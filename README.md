@@ -9,9 +9,9 @@ With **scandump**, no more scraping is needed. As an additional benefit, you can
 ## Features
 
 - Triggers active (default) or passive scans through `nl80211`, optionally restricted to a list of frequencies.
-- Writes one radiotap + 802.11 beacon frame per network found, including BSSID, frequency and band, signal strength, TSF, beacon interval, capabilities and all information elements reported by the driver.
+- Writes one radiotap + 802.11 beacon frame per network found, including BSSID, frequency and band, signal strength, TSF, beacon interval, capabilities and all information elements reported by the driver, however large (see [Limitations](#limitations)).
 - Writes to a file or streams to standard output, so it can be piped into `tcpdump`, Wireshark or your own PCAP reader.
-- Scans repeatedly (or a fixed number of times with `-c`), retrying automatically while another process is scanning, and exits cleanly on Ctrl-C/SIGTERM.
+- Scans repeatedly (or a fixed number of times with `-c`, optionally waiting between scans with `-i`), retrying automatically while another process is scanning, and exits cleanly on Ctrl-C/SIGTERM.
 - Reports failures with stable, documented [exit statuses](#exit-status), so scripts can tell a missing interface from missing privileges.
 
 ## Requirements
@@ -74,10 +74,12 @@ Packaging for Arch Linux and Fedora lives in [`packaging/`](packaging/).
 ## Usage
 
 ```shell
-Usage: scandump [-c count] [-f frequency-list] [-p] [-h] [-V] <interface> <filename>
+Usage: scandump [-c count] [-i interval] [-f frequency-list] [-p] [-h] [-V] <interface> <filename>
 Options:
   -c, --count         Exit after the specified number of scans
                       (default 0: scan until interrupted)
+  -i, --interval      Wait the specified number of seconds between scans
+                      (default 0: start the next scan right away)
   -f, --frequency     Comma-separated list of frequencies in MHz to scan
   -p, --passive       Use passive scan mode
   -h, --help          Display this help message
@@ -86,6 +88,8 @@ Use - as <filename> to write to standard output.
 ```
 
 Where `<interface>` is the name of the WLAN interface (e.g. `wlan0`), and `<filename>` is the name of the PCAP file to be generated. The file is created only after the first scan succeeds. See `man 8 scandump` for details.
+
+The interval is a whole number of seconds from 0 to 86400, counted from the end of one scan (once its results are written) to the start of the next. There is no wait before the first scan or after the last one, and Ctrl-C or SIGTERM ends a wait right away.
 
 ## Permissions
 
@@ -130,6 +134,11 @@ Scan for Wi-Fi networks on `wlan0` passively (don't transmit probe requests):
 $ sudo scandump --passive wlan0 scan.pcap
 ```
 
+Scan 10 times, waiting 5 seconds between scans:
+```console
+$ sudo scandump --count 10 --interval 5 wlan0 scans.pcap
+```
+
 Do a single scan and print the networks found with tcpdump:
 ```console
 $ sudo scandump -c 1 wlan0 - | tcpdump -r - -e
@@ -137,7 +146,7 @@ $ sudo scandump -c 1 wlan0 - | tcpdump -r - -e
 
 ## Troubleshooting
 
-Errors from the kernel are reported through libnl, so the number in parentheses is a libnl error code rather than an errno value.
+Errors from the kernel are reported through libnl, so the number in parentheses is a libnl error code rather than an errno value. For the common ones, scandump prints a hint on the next line.
 
 | Message | Cause and fix |
 | --- | --- |
@@ -152,6 +161,8 @@ Errors from the kernel are reported through libnl, so the number in parentheses 
 | `nl80211: giving up after 30 consecutive transient errors` | The interface stayed busy, or the driver stopped responding, for about a minute. Stop the other scanning process or reload the driver. |
 | `scan.pcap: Too many levels of symbolic links` | The output path is a symlink, which scandump refuses to follow. Write to a regular path. |
 | `scan.pcap: No space left on device` | Writing the output failed. scandump stops and exits with an error, and the file may be incomplete. Free up space or write elsewhere. |
+| `nl80211: Operation not supported (-10)` | The driver does not support scanning, or the requested kind of scan. |
+| `nl80211: skipping incomplete scan result` | The kernel reported a network without the data needed to build a frame (for example, no information elements). That network is left out; the scan continues. |
 
 ## Exit status
 
@@ -165,9 +176,20 @@ Scripts can rely on these values:
 | 255 | Any other error, such as an output file that cannot be created or written. |
 | 256 − *N* | A scan failed with the netlink error *N* shown in the message, e.g. 225 for `No such device (-31)` (not a Wi-Fi interface) or 228 for `Operation not permitted (-28)` (missing `CAP_NET_ADMIN`). |
 
+## Limitations
+
+The frames are reconstructed from the kernel's scan results, not captured over the air, so they differ from the frames the access points sent:
+
+- Every frame is written as a beacon, even when the kernel's most recent data for a network came from a probe response (which is usual after an active scan). Its information elements and timestamp then come from that probe response, which, unlike a beacon, has no TIM element and carries the real SSID of a hidden network. scandump never mixes beacon and probe response data in one frame.
+- The destination is always the broadcast address, the sequence number and duration are 0, and there is no FCS.
+- Each scan writes every network in the kernel's scan results, the same table `iw dev wlan0 scan` shows, not only the networks that scan heard. The kernel keeps a network there for about 30 seconds after it last received a frame from it (longer for the network the interface is connected to), whichever process's scan or connection received that frame, e.g. NetworkManager or wpa_supplicant. So a scan can include networks it missed and, with `-f`, networks on other channels. scandump itself keeps no results between scans.
+- The PCAP timestamp is when the results were written, not when the frame was received, so that records are always in time order. A network the kernel still reports from an earlier frame is written with each scan's time.
+- The signal is the kernel's value rounded toward zero to whole dBm. Drivers that don't report signal in dBm get no signal field, rather than a made-up one.
+- Networks the kernel reports without information elements are skipped, since a beacon without them would be malformed.
+
 ## Contributing
 
-Bug reports and pull requests are welcome on [GitHub](https://github.com/intuitibits/scandump). The build treats compiler warnings as errors, so `make` must succeed without warnings. CI builds with GCC and Clang, runs static analysis, and builds and checks the Debian, Ubuntu, Arch and Fedora packages on every pull request. To run the package checks locally, see [`packaging/README.md`](packaging/README.md).
+Bug reports and pull requests are welcome on [GitHub](https://github.com/intuitibits/scandump). The build treats compiler warnings as errors, so `make` must succeed without warnings. `make check` runs the tests that don't need Wi-Fi hardware: frame construction from synthetic nl80211 scan results, option parsing and exit statuses. CI builds with GCC and Clang, runs static analysis, and builds and checks the Debian, Ubuntu, Arch and Fedora packages on every pull request. To run the package checks locally, see [`packaging/README.md`](packaging/README.md).
 
 ## License
 

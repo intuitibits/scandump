@@ -7,6 +7,8 @@ scandump \- scan for Wi\-Fi networks and write the results in PCAP format
 .B scandump
 .RB [ \-c
 .IR count ]
+.RB [ \-i
+.IR interval ]
 .RB [ \-f
 .IR frequency\-list ]
 .RB [ \-p ]
@@ -58,6 +60,20 @@ Exit after
 scans.
 A count of 0 (the default) scans until interrupted.
 .TP
+.BR \-i ", " \-\-interval " \fIinterval\fR"
+Wait
+.I interval
+seconds between scans, a whole number from 0 to 86400.
+The wait starts when a scan's results have been written and ends when the
+next scan starts; there is none before the first scan or after the last.
+It is measured on the monotonic clock, so changes to the system time do not
+affect it, and
+.B SIGINT
+or
+.B SIGTERM
+ends it immediately.
+The default, 0, starts the next scan right away.
+.TP
 .BR \-f ", " \-\-frequency " \fIfrequency\-list\fR"
 Restrict the scan to a comma\-separated list of center frequencies in MHz,
 for example
@@ -108,6 +124,8 @@ exits with a non\-zero status.
 .SH EXIT STATUS
 Transient scan failures (for example, the interface is busy because another
 process is scanning) are retried every 2 seconds, up to 30 times in a row.
+Errors are reported on standard error, followed by a hint for the common
+ones.
 .TP
 .B 0
 The requested number of scans completed, or
@@ -162,14 +180,45 @@ Scan passively, five times:
 .RS
 .B sudo scandump \-\-passive \-c 5 wlan0 scan.pcap
 .RE
+.PP
+Scan ten times, waiting five seconds between scans:
+.PP
+.RS
+.B sudo scandump \-\-count 10 \-\-interval 5 wlan0 scans.pcap
+.RE
 .SH NOTES
 .B scandump
 requires a Linux kernel with nl80211 (cfg80211) support and a wireless
 driver that implements scanning through it.
 Scan results are synthesized from the kernel's BSS table, not captured
-over the air: information elements longer than the 2048\-byte frame buffer
-are truncated, and the original frame length is recorded in the PCAP
-record header.
+over the air.
+Every frame is written as a beacon carrying all of the information
+elements the kernel reports, however large, together with the TSF
+(802.11 timestamp field) of the frame they came from.
+After an active scan that is usually a probe response, which, unlike a
+beacon, has no TIM element and carries the SSID of a hidden network; beacon
+and probe response data are never mixed in one frame.
+The destination is always the broadcast address, the sequence number and
+duration are 0, and there is no FCS.
+Each scan writes every network in the kernel's scan results, the same table
+.B iw dev
+.I interface
+.B scan
+shows, not only the networks that scan heard.
+The kernel keeps a network there for about 30 seconds after it last
+received a frame from it (longer for the network the interface is connected
+to), whichever process's scan or connection received that frame.
+A scan can therefore include networks it missed and, with
+.BR \-f ,
+networks on other channels.
+.B scandump
+itself keeps no results between scans.
+The PCAP timestamp is when the results were written, not when the frame was
+received, so that records are always in time order; a network the kernel
+still reports from an earlier frame is written with each scan's time.
+The signal is rounded toward zero to whole dBm; drivers that do not report
+it in dBm get no signal field.
+Networks reported without information elements are skipped with a warning.
 .SH SEE ALSO
 .BR iw (8),
 .BR tcpdump (8),

@@ -28,8 +28,15 @@ The Makefile appends its flags to the environment's `CFLAGS`/`CPPFLAGS`/
 `LDFLAGS`/`LDLIBS` and gets library flags from pkg-config; keep it that way so
 distro build systems keep working.
 
-There is no unit test suite. Verifying behavior changes means building and
-running `scandump` against a real wireless interface (requires root and a Linux
+`make check` runs the tests that need no wireless hardware (Linux only, as
+they include the libnl headers): `tests/test_scandump.c` includes
+`scandump.c` with `main` renamed and feeds synthetic nl80211 scan results to
+`callback_dump`, reading back the PCAP it writes, and also tests parsing,
+exit statuses and the interval wait; `tests/cli.sh` checks option handling
+and exit statuses of the built binary. `./tests/test_scandump sample.pcap`
+also writes sample frames for checking with Wireshark/tshark. Debian's build
+runs `make check` (with `WERROR=`). Scanning itself is verified by running
+`scandump` against a real wireless interface (requires root and a Linux
 host with `nl80211` support — this won't run/test on macOS), or
 `.github/workflows/functional.yml`, which scans `mac80211_hwsim`
 radios on pull requests that change `scandump.c` (or on demand). Build and
@@ -42,6 +49,7 @@ sudo ./scandump wlan0 -                # stream PCAP to stdout
 sudo ./scandump -f 2412,5180 wlan0 scan.pcap   # restrict to specific frequencies (MHz)
 sudo ./scandump --passive wlan0 scan.pcap      # passive scan (no probe requests)
 sudo ./scandump -c 5 wlan0 scan.pcap   # stop after 5 scans
+sudo ./scandump -c 5 -i 10 wlan0 scan.pcap   # ... waiting 10 s between scans
 ```
 
 ## Packaging
@@ -79,7 +87,8 @@ Everything is in `scandump.c` and follows one flow:
 3. **Retry policy** (`main`'s scan loop): `-NLE_BUSY`, `-NLE_DUMP_INTR`,
    `-NLE_SEQ_MISMATCH` and `-ETIMEDOUT` from `do_scan_trigger` are treated
    as transient (another process may be scanning) and retried after a
-   `sleep(2)`; any other error is fatal. A scan that comes back `aborted` is
+   2-second `wait_seconds`; any other error is fatal (with a hint from
+   `report_scan_error_hint`). A scan that comes back `aborted` is
    logged and the loop continues rather than exiting. Netlink failures are
    libnl `-NLE_*` codes, not errnos (the kernel's `EBUSY` arrives as
    `-NLE_BUSY`); only local failures such as the `poll()` timeout are
@@ -91,19 +100,31 @@ Everything is in `scandump.c` and follows one flow:
 4. **Dump scan results** (`callback_dump`): once a scan completes, sends
    `NL80211_CMD_GET_SCAN` and, for each BSS the kernel reports, synthesizes a
    fake over-the-air frame:
-   - Starts from the constant `packet_header` byte array — a pre-built
-     radiotap header + 802.11 beacon frame header/addressing — and patches in
-     per-BSS fields by direct byte offset (frequency, channel flags derived
-     from the band, RSSI, transmitter/BSSID address, beacon TSF, beacon
-     interval, capability).
-   - Appends the raw information elements (`NL80211_BSS_INFORMATION_ELEMENTS`)
-     as the beacon frame body, truncated to `MAX_PACKET_SIZE` (2048 bytes).
-   - Writes the resulting frame to the open `pcap_dumper_t` via `pcap_dump`.
-   - **When touching `packet_header` or the byte-offset patches in
-     `callback_dump`, offsets are positional and coupled** — the radiotap
-     header length field (bytes 2–3) and the offsets used later
-     (e.g. `packet[10]`, `packet[25]`, `packet[39]`, ...) must stay
-     consistent with each other if the header layout changes.
+   - Collects the BSS's attributes into a `struct bss_frame`. BSSID,
+     frequency, TSF, capability and information elements are required
+     (a result without them is skipped with a warning); signal and beacon
+     interval are optional, since nl80211 omits them for non-dBm drivers
+     and a zero interval. TSF and IEs both come from
+     `NL80211_BSS_TSF`/`NL80211_BSS_INFORMATION_ELEMENTS` (the latest probe
+     response or beacon); the `BEACON_*` attributes are deliberately unused
+     so the two never come from different frames.
+   - `build_frame` writes the radiotap header (Flags, Channel and, when
+     known, dBm Antenna Signal; 15 bytes, or 14 without signal), the
+     802.11 beacon header and fixed fields (36 bytes), and the IEs
+     unchanged, into `dump_context`'s buffer, which is grown with `realloc`
+     to `frame_len` as needed and reused. Nothing is truncated; `frame_len`
+     returns 0 for a frame over `PCAP_SNAPLEN` (262144), which an nl80211
+     attribute can't reach.
+   - Writes the resulting frame to the open `pcap_dumper_t` via `pcap_dump`,
+     with caplen = len = the frame length, stamped with the time it is
+     written. Don't switch to the BSS's last-seen time: the kernel's scan
+     results include networks heard up to ~30 s earlier (scandump itself
+     caches nothing), so records would go out of order. Running out of memory sets
+     `dump_context.err`, stops the dump and exits 255.
+   - The frame layout is fixed by `tests/test_scandump.c`
+     (`test_frame_layout` checks it byte for byte); keep the radiotap
+     length field, present bitmap and field offsets in `build_frame`
+     consistent if the layout changes.
 5. **Output**: PCAP data is written via libpcap (`pcap_dump_open`/
    `pcap_dump_fopen`), to a file or to stdout when the filename is `-`.
    `DLT_IEEE802_11_RADIO` is the link type, matching the synthesized
@@ -111,6 +132,9 @@ Everything is in `scandump.c` and follows one flow:
    `check_output` checks the stream after each scan and before closing;
    a write error stops the loop with a non-zero exit.
 
-The scan loop in `main` repeats indefinitely unless `-c/--count` is given, and
-the pcap dumper is opened lazily (only after the first successful scan) so no
+The scan loop in `main` repeats indefinitely unless `-c/--count` is given,
+waiting `-i/--interval` seconds between scans (not before the first or after
+the last) with `wait_seconds`, which sleeps on the monotonic clock via
+`ppoll` with SIGINT/SIGTERM blocked outside it, so a stop signal can't be
+missed. The pcap dumper is opened lazily (only after the first successful scan) so no
 empty/partial file is created if the very first scan fails outright.

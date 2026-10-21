@@ -10,6 +10,7 @@ on:
     paths:
       - scandump.c
       - Makefile
+      - tests/**
       - .github/workflows/functional.yml
   workflow_dispatch:
 
@@ -59,6 +60,27 @@ jobs:
         run: |
           sudo ./scandump -c 1 --passive wlan1 passive.pcap
           tcpdump -nn -r passive.pcap | grep -q "Beacon ($SSID)"
+      - name: Scans with an interval
+        run: |
+          start=$(date +%s)
+          sudo ./scandump -c 3 -i 2 wlan1 interval.pcap
+          elapsed=$(( $(date +%s) - start ))
+          echo "3 scans in ${elapsed}s"
+          # Two waits of 2 seconds between three scans, none after the last.
+          test "$elapsed" -ge 4
+          test "$(tcpdump -nn -r interval.pcap | grep -c "Beacon ($SSID)")" -eq 3
+      - name: SIGTERM ends the wait between scans
+        run: |
+          sudo ./scandump -i 60 wlan1 term.pcap &
+          # The file appears once the first scan is done; it is then waiting.
+          for _ in $(seq 30); do [ -e term.pcap ] && break; sleep 1; done
+          sleep 1
+          sudo pkill -TERM -x scandump
+          start=$(date +%s)
+          wait $! && rc=0 || rc=$?
+          test "$rc" -eq 0
+          test $(( $(date +%s) - start )) -lt 10
+          tcpdump -nn -r term.pcap | grep -q "Beacon ($SSID)"
       - name: Stream to standard output
         run: sudo ./scandump -c 1 wlan1 - | tcpdump -nn -r - | grep -q "Beacon ($SSID)"
       - name: Without privileges the scan is refused

@@ -24,6 +24,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 
 #define VERSION "2.3.0"
@@ -31,7 +32,13 @@
 #define NL80211_GENL_FAMILY_NAME "nl80211"
 #define NL80211_GENL_GROUP_NAME "scan"
 
-#define MAX_PACKET_SIZE 2048
+// Snapshot length in the PCAP file header: libpcap's maximum, which is also
+// tcpdump's default. Every frame we can build fits, since the information
+// elements come from a netlink attribute, which is less than 64 KiB.
+#define PCAP_SNAPLEN 262144
+
+// Initial size of the frame buffer, which grows to fit larger frames.
+#define MIN_FRAME_BUF_SIZE 2048
 
 #define MAX_FREQS 100
 
@@ -42,6 +49,10 @@
 // Consecutive transient trigger failures tolerated before giving up
 // (2 seconds apart, so roughly a minute of retrying).
 #define MAX_TRANSIENT_RETRIES 30
+#define TRANSIENT_RETRY_DELAY_SEC 2
+
+// Upper bound for -i/--interval, in seconds (one day).
+#define MAX_INTERVAL_SEC 86400
 
 // Exit statuses, besides 0 and EXIT_FAILURE (1, invalid arguments or an
 // unknown interface name). A scan failure that is not transient exits with
@@ -149,15 +160,19 @@ static int exit_status_for_error(int err) {
   return EXIT_RUNTIME_ERROR;
 }
 
-// Radiotap channel flags for a given center frequency (MHz). Returns 0 for
-// frequencies outside the known 2.4/5/6 GHz ranges.
+// Radiotap channel flags for a given center frequency (MHz): 2 GHz with
+// dynamic CCK-OFDM, 5 GHz with OFDM, or OFDM alone for 6 GHz, which radiotap
+// has no band flag for. The ranges are the bands' edges rather than their
+// first and last channels, so that no channel is missed, e.g. 5 GHz channel
+// 177 (5885 MHz, U-NII-4). 6 GHz starts at the 5925 MHz band edge. Returns 0
+// for frequencies outside these bands.
 static uint16_t channel_flags_for_frequency(uint32_t freq_mhz) {
 
-  if (freq_mhz >= 2412 && freq_mhz <= 2484) {
+  if (freq_mhz >= 2400 && freq_mhz <= 2500) {
     return 0x0480;
-  } else if (freq_mhz >= 5180 && freq_mhz < 5885) {
+  } else if (freq_mhz >= 4900 && freq_mhz < 5925) {
     return 0x0140;
-  } else if (freq_mhz >= 5955 && freq_mhz <= 7115) {
+  } else if (freq_mhz >= 5925 && freq_mhz <= 7125) {
     return 0x0040;
   }
 
@@ -178,18 +193,108 @@ static int8_t clamp_rssi_dbm(long dbm) {
   return (int8_t)dbm;
 }
 
-// How many bytes of an `ie_len`-byte information element blob fit after a
-// `header_len`-byte packet header in a `max_packet_size`-byte buffer. Returns
-// 0 (rather than underflowing) if the header does not fit at all.
-static size_t compute_ie_payload_len(size_t ie_len, size_t max_packet_size,
-                                     size_t header_len) {
+// Radiotap header: version, padding, length and the present bitmap, followed
+// by the fields in bit order, each aligned to its size: Flags (u8), a padding
+// byte, Channel (u16 frequency, u16 flags) and, when the driver reports it in
+// dBm, dBm Antenna Signal (s8). All fields are little-endian.
+#define RADIOTAP_PRESENT_FLAGS 0x00000002
+#define RADIOTAP_PRESENT_CHANNEL 0x00000008
+#define RADIOTAP_PRESENT_DBM_ANTSIGNAL 0x00000020
+#define RADIOTAP_LEN_NO_SIGNAL 14
+#define RADIOTAP_LEN_SIGNAL 15
 
-  if (header_len >= max_packet_size) {
+// 802.11 management header (24 bytes) plus the beacon's fixed fields:
+// timestamp (8), beacon interval (2) and capability information (2).
+#define BEACON_HEADER_LEN 36
+
+// The parts of a scan result that go into a synthesized frame.
+struct bss_frame {
+  const uint8_t *bssid; // SCANDUMP_BSSID_LEN bytes
+  uint32_t freq;        // center frequency in MHz
+  int has_signal;       // whether signal_mbm is known
+  int32_t signal_mbm;   // signal strength in mBm (dBm * 100)
+  uint64_t tsf;
+  uint16_t beacon_int;
+  uint16_t capability;
+  const uint8_t *ies; // information elements, the frame body
+  size_t ies_len;
+};
+
+static void put_le16(uint8_t *p, uint16_t value) {
+  p[0] = value & 0xFF;
+  p[1] = (value >> 8) & 0xFF;
+}
+
+static void put_le32(uint8_t *p, uint32_t value) {
+  for (int i = 0; i < 4; i++) {
+    p[i] = (value >> (i * 8)) & 0xFF;
+  }
+}
+
+static void put_le64(uint8_t *p, uint64_t value) {
+  for (int i = 0; i < 8; i++) {
+    p[i] = (value >> (i * 8)) & 0xFF;
+  }
+}
+
+static size_t radiotap_len(const struct bss_frame *bss) {
+  return bss->has_signal ? RADIOTAP_LEN_SIGNAL : RADIOTAP_LEN_NO_SIGNAL;
+}
+
+// Length of the frame build_frame() writes for `bss`, or 0 if it would be
+// longer than a PCAP record may be.
+static size_t frame_len(const struct bss_frame *bss) {
+
+  size_t header_len = radiotap_len(bss) + BEACON_HEADER_LEN;
+  if (bss->ies_len > PCAP_SNAPLEN - header_len) {
     return 0;
   }
 
-  size_t available = max_packet_size - header_len;
-  return ie_len < available ? ie_len : available;
+  return header_len + bss->ies_len;
+}
+
+// Writes the radiotap + 802.11 beacon frame for `bss` to `buf`, which must
+// hold frame_len(bss) bytes. The information elements are copied unchanged.
+static void build_frame(const struct bss_frame *bss, uint8_t *buf) {
+
+  uint8_t *p = buf;
+  size_t rt_len = radiotap_len(bss);
+  uint32_t present = RADIOTAP_PRESENT_FLAGS | RADIOTAP_PRESENT_CHANNEL;
+  if (bss->has_signal) {
+    present |= RADIOTAP_PRESENT_DBM_ANTSIGNAL;
+  }
+
+  // Radiotap header
+  p[0] = 0x00; // version
+  p[1] = 0x00; // padding
+  put_le16(p + 2, (uint16_t)rt_len);
+  put_le32(p + 4, present);
+  p[8] = 0x00; // flags: no FCS at the end of the frame
+  p[9] = 0x00; // padding, so the channel field is 2-byte aligned
+  put_le16(p + 10, (uint16_t)bss->freq);
+  put_le16(p + 12, channel_flags_for_frequency(bss->freq));
+  if (bss->has_signal) {
+    p[14] = (uint8_t)clamp_rssi_dbm(bss->signal_mbm / 100);
+  }
+  p += rt_len;
+
+  // 802.11 header: a beacon from the BSSID to the broadcast address.
+  p[0] = 0x80; // frame control: management, beacon
+  p[1] = 0x00;
+  put_le16(p + 2, 0);                             // duration
+  memset(p + 4, 0xFF, SCANDUMP_BSSID_LEN);        // destination address
+  memcpy(p + 10, bss->bssid, SCANDUMP_BSSID_LEN); // transmitter address
+  memcpy(p + 16, bss->bssid, SCANDUMP_BSSID_LEN); // BSSID
+  put_le16(p + 22, 0);                            // sequence control
+
+  // Beacon fixed fields
+  put_le64(p + 24, bss->tsf);
+  put_le16(p + 32, bss->beacon_int);
+  put_le16(p + 34, bss->capability);
+  p += BEACON_HEADER_LEN;
+
+  // Information elements
+  memcpy(p, bss->ies, bss->ies_len);
 }
 
 struct trigger_results {
@@ -198,19 +303,16 @@ struct trigger_results {
   int if_index;
 };
 
+// State shared by callback_dump() calls.
+struct dump_context {
+  pcap_dumper_t *dumper;
+  uint8_t *buf; // frame buffer, reused and grown as needed
+  size_t buf_size;
+  int err; // set to a negative errno when a frame could not be written
+};
+
 // Set from SIGINT/SIGTERM to request a clean shutdown.
 static volatile sig_atomic_t g_stop = 0;
-
-static const uint8_t packet_header[] = {
-    // Radiotap header
-    0x00, 0x00, 0x0f, 0x00, 0x2a, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0xff, 0xff, 0x00, 0xff, 0xff,
-    // 802.11 frame header
-    0x80, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00,
-    // 802.11 beacon header
-    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00};
-#define PACKET_HEADER_LEN sizeof(packet_header)
 
 static void handle_stop_signal(int signum) {
   (void)signum;
@@ -275,6 +377,57 @@ static int nl_wait_readable(struct nl_sock *sk, int timeout_sec) {
   }
 }
 
+// Waits `seconds` seconds, measured on the monotonic clock so that changes
+// to the system time don't shorten or stretch the wait. Returns 0 after the
+// full wait, -ECANCELED as soon as a stop signal is received, or -errno if
+// the wait failed. SIGINT and SIGTERM are blocked except while ppoll() waits,
+// so a stop signal can't slip in between checking g_stop and starting to
+// wait.
+static int wait_seconds(long seconds) {
+
+  sigset_t stop_signals, wait_mask;
+  sigemptyset(&stop_signals);
+  sigaddset(&stop_signals, SIGINT);
+  sigaddset(&stop_signals, SIGTERM);
+  if (sigprocmask(SIG_BLOCK, &stop_signals, &wait_mask) < 0) {
+    return -errno;
+  }
+
+  struct timespec deadline;
+  clock_gettime(CLOCK_MONOTONIC, &deadline);
+  deadline.tv_sec += seconds;
+
+  int ret = 0;
+  for (;;) {
+    if (g_stop) {
+      ret = -ECANCELED;
+      break;
+    }
+
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    struct timespec left = {.tv_sec = deadline.tv_sec - now.tv_sec,
+                            .tv_nsec = deadline.tv_nsec - now.tv_nsec};
+    if (left.tv_nsec < 0) {
+      left.tv_sec--;
+      left.tv_nsec += 1000000000L;
+    }
+    if (left.tv_sec < 0) {
+      break;
+    }
+
+    // Returns 0 on timeout, or -1 with EINTR when a signal was handled; the
+    // loop then checks g_stop and how much of the wait is left.
+    if (ppoll(NULL, 0, &left, &wait_mask) < 0 && errno != EINTR) {
+      ret = -errno;
+      break;
+    }
+  }
+
+  sigprocmask(SIG_SETMASK, &wait_mask, NULL);
+  return ret;
+}
+
 static void report_recv_error(int err) {
 
   if (err == -ETIMEDOUT) {
@@ -282,6 +435,40 @@ static void report_recv_error(int err) {
             NL_RECV_TIMEOUT_SEC);
   } else if (err != -ECANCELED) {
     fprintf(stderr, "nl80211: %s (%d)\n", nl_geterror(err), err);
+  }
+}
+
+// After a fatal scan error has been reported, suggests a fix for the common
+// causes.
+static void report_scan_error_hint(int err, const char *ifname,
+                                   int num_freqs) {
+
+  switch (err) {
+  case -NLE_PERM:
+  case -NLE_NOACCESS:
+    fprintf(stderr, "scanning requires the CAP_NET_ADMIN capability, "
+                    "e.g. by running scandump as root\n");
+    break;
+  case -NLE_NODEV:
+    fprintf(stderr, "%s is not a Wi-Fi (nl80211) interface\n", ifname);
+    break;
+  case -NLE_OPNOTSUPP:
+    fprintf(stderr, "the driver of %s does not support this scan\n", ifname);
+    break;
+  case -NLE_INVAL:
+    if (num_freqs > 0) {
+      fprintf(stderr, "check that %s supports the frequencies given with -f\n",
+              ifname);
+    }
+    break;
+#ifdef NLE_NETDOWN // libnl 3.10 and later
+  case -NLE_NETDOWN:
+    fprintf(stderr, "%s is down; bring it up with: ip link set %s up\n",
+            ifname, ifname);
+    break;
+#endif
+  default:
+    break;
   }
 }
 
@@ -324,9 +511,8 @@ static int callback_dump(struct nl_msg *msg, void *arg) {
 
   // Called by the kernel for each network found.
   struct genlmsghdr *gnlh = nlmsg_data(nlmsg_hdr(msg));
-  pcap_dumper_t *dumper = arg;
-  static struct pcap_pkthdr header;
-  static u_char packet[MAX_PACKET_SIZE];
+  struct dump_context *ctx = arg;
+  struct pcap_pkthdr header;
   struct nlattr *tb[NL80211_ATTR_MAX + 1];
   struct nlattr *bss[NL80211_BSS_MAX + 1];
   static struct nla_policy bss_policy[NL80211_BSS_MAX + 1] = {
@@ -352,83 +538,87 @@ static int callback_dump(struct nl_msg *msg, void *arg) {
 
   if (nla_parse_nested(bss, NL80211_BSS_MAX, tb[NL80211_ATTR_BSS],
                        bss_policy)) {
+    fprintf(stderr, "nl80211: skipping malformed scan result\n");
     return NL_SKIP;
   }
 
+  // nl80211 leaves out the beacon interval when it is 0 and the signal
+  // unless the driver measures it in dBm, so those are optional. It also
+  // leaves out empty information elements, but a beacon without any (not
+  // even an SSID) is malformed, so such a result is skipped.
   if (!bss[NL80211_BSS_BSSID] ||
       !bss[NL80211_BSS_FREQUENCY] ||
-      !bss[NL80211_BSS_SIGNAL_MBM] ||
       !bss[NL80211_BSS_TSF] ||
-      !bss[NL80211_BSS_BEACON_INTERVAL] ||
       !bss[NL80211_BSS_CAPABILITY] ||
-      !bss[NL80211_BSS_INFORMATION_ELEMENTS])
+      !bss[NL80211_BSS_INFORMATION_ELEMENTS] ||
+      nla_len(bss[NL80211_BSS_INFORMATION_ELEMENTS]) <= 0)
   {
+    fprintf(stderr, "nl80211: skipping incomplete scan result\n");
     return NL_SKIP;
   }
 
   // The BSSID attribute is unspecified/unvalidated by the parse policy above,
   // so its length has to be checked before it is copied into the packet.
   if (nla_len(bss[NL80211_BSS_BSSID]) != SCANDUMP_BSSID_LEN) {
+    fprintf(stderr, "nl80211: skipping malformed scan result\n");
     return NL_SKIP;
   }
 
-  int ie_data_len = nla_len(bss[NL80211_BSS_INFORMATION_ELEMENTS]);
-  if (ie_data_len < 0) {
+  struct bss_frame frame = {
+      .bssid = nla_data(bss[NL80211_BSS_BSSID]),
+      .freq = nla_get_u32(bss[NL80211_BSS_FREQUENCY]),
+      // NL80211_BSS_TSF and NL80211_BSS_INFORMATION_ELEMENTS come from the
+      // same frame: the most recent probe response if there was one,
+      // otherwise the most recent beacon. NL80211_BSS_BEACON_TSF and
+      // NL80211_BSS_BEACON_IES are not used, so that the timestamp and the
+      // elements always match.
+      .tsf = nla_get_u64(bss[NL80211_BSS_TSF]),
+      .capability = nla_get_u16(bss[NL80211_BSS_CAPABILITY]),
+      .ies = nla_data(bss[NL80211_BSS_INFORMATION_ELEMENTS]),
+      .ies_len = (size_t)nla_len(bss[NL80211_BSS_INFORMATION_ELEMENTS]),
+  };
+
+  if (bss[NL80211_BSS_SIGNAL_MBM]) {
+    frame.has_signal = 1;
+    frame.signal_mbm = (int32_t)nla_get_u32(bss[NL80211_BSS_SIGNAL_MBM]);
+  }
+
+  if (bss[NL80211_BSS_BEACON_INTERVAL]) {
+    frame.beacon_int = nla_get_u16(bss[NL80211_BSS_BEACON_INTERVAL]);
+  }
+
+  size_t len = frame_len(&frame);
+  if (len == 0) {
+    fprintf(stderr, "nl80211: skipping scan result too large for PCAP\n");
     return NL_SKIP;
   }
 
-  // Prepare packet with radiotap and beacon headers.
-  memcpy(packet, packet_header, PACKET_HEADER_LEN);
-
-  // Channel frequency
-  uint32_t freq = nla_get_u32(bss[NL80211_BSS_FREQUENCY]);
-  packet[10] = freq & 0xFF;
-  packet[11] = (freq >> 8) & 0xFF;
-
-  // Channel flags
-  uint16_t channel_flags = channel_flags_for_frequency(freq);
-  packet[12] = channel_flags & 0xFF;
-  packet[13] = (channel_flags >> 8) & 0xFF;
-
-  // RSSI
-  int32_t signal_mbm = (int32_t)nla_get_u32(bss[NL80211_BSS_SIGNAL_MBM]);
-  packet[14] = (u_char)clamp_rssi_dbm(signal_mbm / 100);
-
-  // Transmitter address and BSSID
-  u_char *bssid = nla_data(bss[NL80211_BSS_BSSID]);
-  memcpy(&packet[25], bssid, SCANDUMP_BSSID_LEN);
-  memcpy(&packet[31], bssid, SCANDUMP_BSSID_LEN);
-
-  // Beacon TSF
-  uint64_t beacon_tsf = nla_get_u64(bss[NL80211_BSS_TSF]);
-  for (int i = 0; i < 8; i++) {
-    packet[39 + i] = (beacon_tsf >> (i * 8)) & 0xFF;
+  // Grow the frame buffer if this frame doesn't fit.
+  if (len > ctx->buf_size) {
+    size_t size = len < MIN_FRAME_BUF_SIZE ? MIN_FRAME_BUF_SIZE : len;
+    uint8_t *buf = realloc(ctx->buf, size);
+    if (!buf) {
+      fprintf(stderr, "out of memory allocating a %zu-byte frame\n", size);
+      ctx->err = -ENOMEM;
+      return NL_STOP;
+    }
+    ctx->buf = buf;
+    ctx->buf_size = size;
   }
 
-  // Beacon interval
-  uint16_t beacon_int = nla_get_u16(bss[NL80211_BSS_BEACON_INTERVAL]);
-  packet[47] = beacon_int & 0xFF;
-  packet[48] = (beacon_int >> 8) & 0xFF;
+  build_frame(&frame, ctx->buf);
 
-  // Beacon capability
-  uint16_t beacon_cap = nla_get_u16(bss[NL80211_BSS_CAPABILITY]);
-  packet[49] = beacon_cap & 0xFF;
-  packet[50] = (beacon_cap >> 8) & 0xFF;
-
-  // IEs
-  u_char *ie_data = nla_data(bss[NL80211_BSS_INFORMATION_ELEMENTS]);
-  size_t payload_len = compute_ie_payload_len((size_t)ie_data_len,
-                                              MAX_PACKET_SIZE,
-                                              PACKET_HEADER_LEN);
-  memcpy(packet + PACKET_HEADER_LEN, ie_data, payload_len);
-
-  // Update pcap header with final length values.
-  header.caplen = (bpf_u_int32)(PACKET_HEADER_LEN + payload_len);
-  header.len = (bpf_u_int32)(PACKET_HEADER_LEN + (size_t)ie_data_len);
+  // The whole frame is written, so the captured and original lengths match.
+  header.caplen = (bpf_u_int32)len;
+  header.len = (bpf_u_int32)len;
+  // The time the frame is written, not when it was received: see the
+  // limitations in scandump(8). Records stay in order that way, which
+  // receive times can't guarantee, since the kernel's scan results include
+  // networks last heard before this scan, until they expire.
   gettimeofday(&(header.ts), NULL);
 
   // Write packet out.
-  pcap_dump((u_char *)dumper, &header, (u_char *)packet);
+  pcap_dump((u_char *)ctx->dumper, &header, ctx->buf);
 
   return NL_SKIP;
 }
@@ -611,10 +801,12 @@ cleanup:
 // written to stdout.
 static void print_usage(FILE *out, const char *program_name)
 {
-  fprintf(out, "Usage: %s [-c count] [-f frequency-list] [-p] [-h] [-V] <interface> <filename>\n", program_name);
+  fprintf(out, "Usage: %s [-c count] [-i interval] [-f frequency-list] [-p] [-h] [-V] <interface> <filename>\n", program_name);
   fprintf(out, "Options:\n");
   fprintf(out, "  -c, --count         Exit after the specified number of scans\n");
   fprintf(out, "                      (default 0: scan until interrupted)\n");
+  fprintf(out, "  -i, --interval      Wait the specified number of seconds between scans\n");
+  fprintf(out, "                      (default 0: start the next scan right away)\n");
   fprintf(out, "  -f, --frequency     Comma-separated list of frequencies in MHz to scan\n");
   fprintf(out, "  -p, --passive       Use passive scan mode\n");
   fprintf(out, "  -h, --help          Display this help message\n");
@@ -670,8 +862,9 @@ int main(int argc, char *argv[]) {
   int opt, err;
   pcap_t *handle = NULL;
   pcap_dumper_t *dumper = NULL;
+  struct dump_context dump_ctx = {0};
   int linktype = DLT_IEEE802_11_RADIO;
-  int snaplen = 65535;
+  int snaplen = PCAP_SNAPLEN;
   int exit_code = 0;
 
   int version_flag = 0;
@@ -679,9 +872,11 @@ int main(int argc, char *argv[]) {
   char* frequency_list = NULL;
   int freqs[MAX_FREQS];
   int count = 0;
+  long interval = 0;
 
   struct option long_options[] = {
     {"count", required_argument, 0, 'c'},
+    {"interval", required_argument, 0, 'i'},
     {"frequency", required_argument, 0, 'f'},
     {"passive", no_argument, 0, 'p'},
     {"help", no_argument, 0, 'h'},
@@ -689,7 +884,7 @@ int main(int argc, char *argv[]) {
     {0, 0, 0, 0}
   };
 
-  while ((opt = getopt_long(argc, argv, "c:f:phV", long_options, NULL)) != -1) {
+  while ((opt = getopt_long(argc, argv, "c:i:f:phV", long_options, NULL)) != -1) {
     switch (opt) {
       case 'c': {
         long value;
@@ -700,6 +895,13 @@ int main(int argc, char *argv[]) {
         count = (int)value;
         break;
       }
+      case 'i':
+        if (parse_long_strict(optarg, 0, MAX_INTERVAL_SEC, &interval) < 0) {
+          fprintf(stderr, "invalid interval: %s (expected 0 to %d seconds)\n",
+                  optarg, MAX_INTERVAL_SEC);
+          exit(EXIT_FAILURE);
+        }
+        break;
       case 'f':
         frequency_list = optarg;
         break;
@@ -781,6 +983,10 @@ int main(int argc, char *argv[]) {
   int genl_id = genl_ctrl_resolve(sk, NL80211_GENL_FAMILY_NAME);
   if (genl_id < 0) {
     fprintf(stderr, "nl80211: %s (%d)\n", nl_geterror(genl_id), genl_id);
+    if (genl_id == -NLE_OBJ_NOTFOUND) {
+      fprintf(stderr, "nl80211 is not available; is the cfg80211 kernel "
+                      "module loaded?\n");
+    }
     exit_code = EXIT_RUNTIME_ERROR;
     goto cleanup;
   }
@@ -821,14 +1027,20 @@ int main(int argc, char *argv[]) {
           exit_code = EXIT_BUSY;
           goto cleanup;
         }
-        sleep(2);
-        if (g_stop) {
+        err = wait_seconds(TRANSIENT_RETRY_DELAY_SEC);
+        if (err == -ECANCELED) {
           break;
+        }
+        if (err < 0) {
+          fprintf(stderr, "wait: %s\n", strerror(-err));
+          exit_code = EXIT_RUNTIME_ERROR;
+          goto cleanup;
         }
         continue;
       }
 
       // Other errors are not expected, so we quit.
+      report_scan_error_hint(trigger_err, argv[optind], num_freqs);
       exit_code = exit_status_for_error(trigger_err);
       goto cleanup;
     }
@@ -855,6 +1067,7 @@ int main(int argc, char *argv[]) {
         exit_code = EXIT_RUNTIME_ERROR;
         goto cleanup;
       }
+      dump_ctx.dumper = dumper;
     }
 
     // Dump networks found into file.
@@ -881,7 +1094,8 @@ int main(int argc, char *argv[]) {
       goto cleanup;
     }
 
-    nl_socket_modify_cb(sk, NL_CB_VALID, NL_CB_CUSTOM, callback_dump, dumper);
+    nl_socket_modify_cb(sk, NL_CB_VALID, NL_CB_CUSTOM, callback_dump,
+                        &dump_ctx);
     ret = nl_send_auto(sk, msg);
     if (ret < 0) {
       fprintf(stderr, "warning: %s (%d)\n", nl_geterror(ret), ret);
@@ -898,6 +1112,11 @@ int main(int argc, char *argv[]) {
     }
     nlmsg_free(msg);
 
+    if (dump_ctx.err < 0) {
+      exit_code = EXIT_RUNTIME_ERROR;
+      goto cleanup;
+    }
+
     // Only flush when streaming to stdout, where a consumer is waiting for
     // the data; file output is flushed before it is closed below. Either way,
     // stop on a write error rather than keep scanning into a broken output.
@@ -907,6 +1126,19 @@ int main(int argc, char *argv[]) {
     }
 
     n++;
+
+    // Wait between scans, but not before the first or after the last one.
+    if (interval > 0 && (count == 0 || n < count)) {
+      err = wait_seconds(interval);
+      if (err == -ECANCELED) {
+        break;
+      }
+      if (err < 0) {
+        fprintf(stderr, "wait: %s\n", strerror(-err));
+        exit_code = EXIT_RUNTIME_ERROR;
+        goto cleanup;
+      }
+    }
   }
 
 cleanup:
@@ -917,6 +1149,7 @@ cleanup:
     }
     pcap_dump_close(dumper);
   }
+  free(dump_ctx.buf);
   if (handle) {
     pcap_close(handle);
   }
