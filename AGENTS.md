@@ -30,9 +30,10 @@ distro build systems keep working.
 
 There is no unit test suite. Verifying behavior changes means building and
 running `scandump` against a real wireless interface (requires root and a Linux
-host with `nl80211` support — this won't run/test on macOS), or the manually
-triggered `.github/workflows/functional.yml`, which scans `mac80211_hwsim`
-radios. Build and packaging checks run in containers via `packaging/ci/*.sh`
+host with `nl80211` support — this won't run/test on macOS), or
+`.github/workflows/functional.yml`, which scans `mac80211_hwsim`
+radios on pull requests that change `scandump.c` (or on demand). Build and
+packaging checks run in containers via `packaging/ci/*.sh`
 (see `packaging/README.md`) and in `.github/workflows/ci.yml`.
 
 ```shell

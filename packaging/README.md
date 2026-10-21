@@ -34,5 +34,5 @@ and push to `main`, plus GCC and Clang builds with `-Werror`, a build from `make
 outside the Git checkout, cppcheck, `gcc -fanalyzer` and mandoc lint.
 Packages are kept as workflow artifacts and never published.
 `.github/workflows/functional.yml` runs real scans against simulated radios
-(`mac80211_hwsim` + hostapd). It is started manually.
+(`mac80211_hwsim` + hostapd) on pull requests that change `scandump.c`, and can be started manually.
 

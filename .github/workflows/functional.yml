@@ -2,10 +2,15 @@
 # runs a hostapd access point, the other is scanned with scandump. No real
 # Wi-Fi hardware is needed, but the runner's kernel must provide the hwsim
 # module, so this is kept apart from the build and packaging checks in
-# ci.yml and only runs on demand.
+# ci.yml. It runs on pull requests that change the scanner, and on demand.
 name: Functional tests (hwsim)
 
 on:
+  pull_request:
+    paths:
+      - scandump.c
+      - Makefile
+      - .github/workflows/functional.yml
   workflow_dispatch:
 
 permissions:
