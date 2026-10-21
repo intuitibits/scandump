@@ -9,8 +9,7 @@ url='https://github.com/intuitibits/scandump'
 license=('GPL-3.0-only')
 depends=('glibc' 'libnl' 'libpcap')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-# Run updpkgsums once the v$pkgver tag exists.
-sha256sums=('0000000000000000000000000000000000000000000000000000000000000000')
+sha256sums=('a708ca58fb1bdd7f84df63051fe38ea0ab5acf472af6e1bc21bbc7d24a29fe99')
 
 build() {
   cd "$pkgname-$pkgver"
@@ -19,6 +18,7 @@ build() {
 
 check() {
   cd "$pkgname-$pkgver"
+  make check WERROR=
   ./scandump --version | grep -qx "scandump version $pkgver"
 }
 
