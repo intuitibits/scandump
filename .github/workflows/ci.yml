@@ -32,6 +32,8 @@ jobs:
       - name: Build (warnings are errors)
         run: make CC=${{ matrix.cc }}
       - run: ./scandump --version
+      - name: Tests
+        run: make CC=${{ matrix.cc }} check
       - name: Staged install and uninstall
         run: |
           stage="$RUNNER_TEMP/stage"

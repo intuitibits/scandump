@@ -2,9 +2,33 @@
 
 ## 2.3.0 — unreleased
 
-Packaging and documentation release, with small robustness fixes.
-Scanning and PCAP output are unchanged.
+Packaging and documentation release, with a new `-i`/`--interval` option
+and fixes to the PCAP output.
 
+- Add `-i`/`--interval` to wait a number of seconds between scans. The
+  default (0) keeps the previous behavior.
+- Write all information elements of every network. They were truncated to
+  fit a 2048-byte frame, which large Wi-Fi 6E/7 beacons exceed. The PCAP
+  snapshot length is now 262144 (tcpdump's default) instead of 65535.
+- Write networks whose driver doesn't report signal in dBm (without a signal
+  field) and networks with a beacon interval of 0. Both used to be dropped.
+- Set the radiotap channel flags for 5 GHz channel 177 (5885 MHz), which got
+  none. Flags now follow the band edges (6 GHz from 5925 MHz) rather than a
+  list of channel ranges.
+- Warn when the kernel reports a network that can't be written, instead of
+  skipping it silently, and stop with an error if memory runs out.
+- After a fatal scan error, print a hint for the common causes (missing
+  `CAP_NET_ADMIN`, not a Wi-Fi interface, interface down, scan not
+  supported). Messages and exit statuses are otherwise unchanged.
+- Write each scan's frames only once all of its results have been read, and
+  flush them, to a file as well as to standard output. A scan whose results
+  can't be read in full writes nothing, doesn't count towards `-c` and is
+  retried like a busy interface; results that changed while being read are
+  read again.
+- Stop quietly with status 0 when the program reading standard output
+  closes the pipe (e.g. `tcpdump -c 5`), instead of being killed by SIGPIPE.
+- Add `make check`, which tests frame construction, option parsing and exit
+  statuses without Wi-Fi hardware.
 - Report write errors (for example, a full disk) and exit non-zero instead
   of leaving a truncated PCAP file and exiting 0.
 - Validate the interface index in scan events before reading it.
