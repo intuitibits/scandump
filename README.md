@@ -2,7 +2,7 @@
 
 A command-line utility that scans for Wi-Fi networks using the 802.11 netlink API and outputs the scan results in PCAP format.
 
-Typically, processes that need to gather data about nearby Wi-Fi networks would do a scan using [iw](https://wireless.wiki.kernel.org/en/users/documentation/iw) and scrape its text output. However, it is generally a bad idea to try parsing another program's output if it is not designed to be consumed by other processes. The text may change with newer updates or simply by running the program on a different system. 
+Typically, processes that need to gather data about nearby Wi-Fi networks would do a scan using [iw](https://wireless.docs.kernel.org/en/latest/en/users/documentation/iw.html) and scrape its text output. However, it is generally a bad idea to try parsing another program's output if it is not designed to be consumed by other processes. The text may change with newer updates or simply by running the program on a different system. 
 
 With **scandump**, no more scraping is needed. As an additional benefit, you can generate a PCAP file with radiotap + beacon frame data from the scan using a wireless interface that may not support monitor mode.
 
@@ -12,6 +12,7 @@ With **scandump**, no more scraping is needed. As an additional benefit, you can
 - Writes one radiotap + 802.11 beacon frame per network found, including BSSID, frequency and band, signal strength, TSF, beacon interval, capabilities and all information elements reported by the driver.
 - Writes to a file or streams to standard output, so it can be piped into `tcpdump`, Wireshark or your own PCAP reader.
 - Scans repeatedly (or a fixed number of times with `-c`), retrying automatically while another process is scanning, and exits cleanly on Ctrl-C/SIGTERM.
+- Reports failures with stable, documented [exit statuses](#exit-status), so scripts can tell a missing interface from missing privileges.
 
 ## Requirements
 
@@ -60,7 +61,7 @@ For example, `make PREFIX=/usr/local && sudo make PREFIX=/usr/local install`. Us
 
 ### Debian / Ubuntu package
 
-The repository contains Debian packaging. To build a binary package locally:
+The repository contains Debian packaging. With the build dependencies above installed, build a binary package locally:
 
 ```shell
 sudo apt install debhelper devscripts
@@ -68,7 +69,7 @@ dpkg-buildpackage -b -us -uc
 sudo apt install ../scandump_*.deb
 ```
 
-Packaging for other distributions lives in [`packaging/`](packaging/).
+Packaging for Arch Linux and Fedora lives in [`packaging/`](packaging/).
 
 ## Usage
 
@@ -84,7 +85,7 @@ Options:
 Use - as <filename> to write to standard output.
 ```
 
-Where `<interface>` is the name of the WLAN interface (e.g. `wlan0`), and `<filename>` is the name of the PCAP file to be generated. Standard output is used if filename is `-`. Without `-c`, scandump keeps scanning until interrupted. See `man 8 scandump` for details.
+Where `<interface>` is the name of the WLAN interface (e.g. `wlan0`), and `<filename>` is the name of the PCAP file to be generated. The file is created only after the first scan succeeds. See `man 8 scandump` for details.
 
 ## Permissions
 
@@ -145,10 +146,28 @@ Errors from the kernel are reported through libnl, so the number in parentheses 
 | `nl80211: No such device (-31)` | The interface exists but is not a Wi-Fi interface. |
 | `nl80211: Object not found (-12)` | The kernel has no nl80211 support (cfg80211 is not loaded). |
 | `nl80211: Network is down (-36)` | The interface is down. Bring it up with `sudo ip link set wlan0 up`. |
-| `nl80211: Object busy (-25)`, repeated | Another process (often NetworkManager or wpa_supplicant) is scanning. scandump retries every 2 seconds and gives up after 30 consecutive failures. |
+| `nl80211: Object busy (-25)`, repeated | Another process (often NetworkManager or wpa_supplicant) is scanning. scandump retries every 2 seconds. |
 | `nl80211: scan aborted` | The driver or another process cancelled the scan; scandump continues with the next one. |
 | `nl80211: timed out after 30 seconds waiting for a reply` | The driver never reported scan completion; scandump retries. |
+| `nl80211: giving up after 30 consecutive transient errors` | The interface stayed busy, or the driver stopped responding, for about a minute. Stop the other scanning process or reload the driver. |
 | `scan.pcap: Too many levels of symbolic links` | The output path is a symlink, which scandump refuses to follow. Write to a regular path. |
+| `scan.pcap: No space left on device` | Writing the output failed. scandump stops and exits with an error, and the file may be incomplete. Free up space or write elsewhere. |
+
+## Exit status
+
+Scripts can rely on these values:
+
+| Status | Meaning |
+| --- | --- |
+| 0 | The requested number of scans completed, or scandump was interrupted. |
+| 1 | Invalid arguments, or no interface with the given name. |
+| 240 | Gave up after 30 consecutive transient failures. |
+| 255 | Any other error, such as an output file that cannot be created or written. |
+| 256 − *N* | A scan failed with the netlink error *N* shown in the message, e.g. 225 for `No such device (-31)` (not a Wi-Fi interface) or 228 for `Operation not permitted (-28)` (missing `CAP_NET_ADMIN`). |
+
+## Contributing
+
+Bug reports and pull requests are welcome on [GitHub](https://github.com/intuitibits/scandump). The build treats compiler warnings as errors, so `make` must succeed without warnings. CI builds with GCC and Clang, runs static analysis, and builds and checks the Debian, Ubuntu, Arch and Fedora packages on every pull request. To run the package checks locally, see [`packaging/README.md`](packaging/README.md).
 
 ## License
 
