@@ -97,9 +97,14 @@ Everything is in `scandump.c` and follows one flow:
    usage, 240 when retries run out, 255 for other failures,
    and `256 + err` for a fatal scan error. They are documented in
    `scandump.8`; don't change them.
-4. **Dump scan results** (`callback_dump`): once a scan completes, sends
-   `NL80211_CMD_GET_SCAN` and, for each BSS the kernel reports, synthesizes a
-   fake over-the-air frame:
+4. **Dump scan results** (`do_scan_dump`, `callback_dump`): once a scan
+   completes, sends `NL80211_CMD_GET_SCAN` and, for each BSS the kernel
+   reports, synthesizes a fake over-the-air frame. The frames are only
+   collected in `dump_context`; `write_frames` writes them once the whole
+   dump has been read, so a failed dump leaves nothing in the output. A
+   dump interrupted by a change to the kernel's table (`-NLE_DUMP_INTR`) is
+   read again (`MAX_DUMP_ATTEMPTS`); any other failed dump is retried like
+   a transient trigger error, by scanning again, and isn't counted.
    - Collects the BSS's attributes into a `struct bss_frame`. BSSID,
      frequency, TSF, capability and information elements are required
      (a result without them is skipped with a warning); signal and beacon
@@ -111,13 +116,12 @@ Everything is in `scandump.c` and follows one flow:
    - `build_frame` writes the radiotap header (Flags, Channel and, when
      known, dBm Antenna Signal; 15 bytes, or 14 without signal), the
      802.11 beacon header and fixed fields (36 bytes), and the IEs
-     unchanged, into `dump_context`'s buffer, which is grown with `realloc`
-     to `frame_len` as needed and reused. Nothing is truncated; `frame_len`
+     unchanged, into `dump_context`'s buffer (one length-prefixed record per
+     frame), which is grown with `realloc` as needed and reused. Nothing is truncated; `frame_len`
      returns 0 for a frame over `PCAP_SNAPLEN` (262144), which an nl80211
      attribute can't reach.
-   - Writes the resulting frame to the open `pcap_dumper_t` via `pcap_dump`,
-     with caplen = len = the frame length, stamped with the time it is
-     written. Don't switch to the BSS's last-seen time: the kernel's scan
+   - `write_frames` writes each frame via `pcap_dump`, with caplen = len =
+     the frame length, stamped with the time it is written. Don't switch to the BSS's last-seen time: the kernel's scan
      results include networks heard up to ~30 s earlier (scandump itself
      caches nothing), so records would go out of order. Running out of memory sets
      `dump_context.err`, stops the dump and exits 255.
@@ -129,8 +133,10 @@ Everything is in `scandump.c` and follows one flow:
    `pcap_dump_fopen`), to a file or to stdout when the filename is `-`.
    `DLT_IEEE802_11_RADIO` is the link type, matching the synthesized
    radiotap-prefixed frames. `pcap_dump()` can't report errors, so
-   `check_output` checks the stream after each scan and before closing;
-   a write error stops the loop with a non-zero exit.
+   `check_output` flushes and checks the stream after each scan (file or
+   stdout) and before closing; a write error stops the loop with a non-zero
+   exit. SIGPIPE is ignored, so a reader closing the pipe shows up as
+   `-EPIPE`, which stops the loop quietly with status 0.
 
 The scan loop in `main` repeats indefinitely unless `-c/--count` is given,
 waiting `-i/--interval` seconds between scans (not before the first or after

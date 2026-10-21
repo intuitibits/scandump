@@ -20,6 +20,13 @@ and fixes to the PCAP output.
 - After a fatal scan error, print a hint for the common causes (missing
   `CAP_NET_ADMIN`, not a Wi-Fi interface, interface down, scan not
   supported). Messages and exit statuses are otherwise unchanged.
+- Write each scan's frames only once all of its results have been read, and
+  flush them, to a file as well as to standard output. A scan whose results
+  can't be read in full writes nothing, doesn't count towards `-c` and is
+  retried like a busy interface; results that changed while being read are
+  read again.
+- Stop quietly with status 0 when the program reading standard output
+  closes the pipe (e.g. `tcpdump -c 5`), instead of being killed by SIGPIPE.
 - Add `make check`, which tests frame construction, option parsing and exit
   statuses without Wi-Fi hardware.
 - Report write errors (for example, a full disk) and exit non-zero instead

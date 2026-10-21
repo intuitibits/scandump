@@ -162,6 +162,7 @@ Errors from the kernel are reported through libnl, so the number in parentheses 
 | `scan.pcap: Too many levels of symbolic links` | The output path is a symlink, which scandump refuses to follow. Write to a regular path. |
 | `scan.pcap: No space left on device` | Writing the output failed. scandump stops and exits with an error, and the file may be incomplete. Free up space or write elsewhere. |
 | `nl80211: Operation not supported (-10)` | The driver does not support scanning, or the requested kind of scan. |
+| `nl80211: reading scan results: ...` | The scan's results could not be read in full. Nothing from that scan is written, it doesn't count towards `-c`, and scandump scans again after 2 seconds. |
 | `nl80211: skipping incomplete scan result` | The kernel reported a network without the data needed to build a frame (for example, no information elements). That network is left out; the scan continues. |
 
 ## Exit status
@@ -170,7 +171,7 @@ Scripts can rely on these values:
 
 | Status | Meaning |
 | --- | --- |
-| 0 | The requested number of scans completed, or scandump was interrupted. |
+| 0 | The requested number of scans completed, scandump was interrupted, or the program reading its standard output closed the pipe (e.g. `tcpdump -c 5`). |
 | 1 | Invalid arguments, or no interface with the given name. |
 | 240 | Gave up after 30 consecutive transient failures. |
 | 255 | Any other error, such as an output file that cannot be created or written. |

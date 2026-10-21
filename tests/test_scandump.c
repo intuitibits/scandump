@@ -204,12 +204,16 @@ static int dump_frames(struct nl_msg **msgs, int num_msgs, struct frame *out,
     return -1;
   }
 
-  struct dump_context ctx = {.dumper = dumper};
+  // Frames are only collected until write_frames() is called.
+  struct dump_context ctx = {0};
   for (int i = 0; i < num_msgs; i++) {
     callback_dump(msgs[i], &ctx);
   }
   CHECK(ctx.err == 0);
-  CHECK(check_output(dumper, path, 1) == 0);
+  CHECK(pcap_dump_ftell(dumper) == 24); // just the file header
+  errno = 0;
+  write_frames(&ctx, dumper);
+  CHECK(check_output(dumper, path) == 0);
   pcap_dump_close(dumper);
   pcap_close(dead);
   free(ctx.buf);
@@ -594,22 +598,44 @@ static void test_exit_status(void) {
   CHECK(exit_status_for_error(0) == EXIT_RUNTIME_ERROR);
 }
 
-// A write error (here, a full device) is reported rather than lost.
+// A write error (here, a full device) is reported rather than lost, and a
+// reader closing the pipe is told apart from it.
 static void test_output_errors(void) {
 
+  pcap_t *dead = pcap_open_dead(DLT_IEEE802_11_RADIO, PCAP_SNAPLEN);
+
   FILE *fp = fopen("/dev/full", "w");
-  if (!fp) {
+  if (fp) {
+    pcap_dumper_t *dumper = pcap_dump_fopen(dead, fp);
+    CHECK(dumper != NULL);
+    if (dumper) {
+      errno = 0;
+      CHECK(check_output(dumper, "/dev/full") == -1);
+      pcap_dump_close(dumper);
+    }
+  } else {
     printf("skipping write error test: no /dev/full\n");
-    return;
   }
 
-  pcap_t *dead = pcap_open_dead(DLT_IEEE802_11_RADIO, PCAP_SNAPLEN);
-  pcap_dumper_t *dumper = pcap_dump_fopen(dead, fp);
+  // With SIGPIPE ignored, as main() does, writing to a pipe whose reader
+  // has gone fails with EPIPE, which is reported as -EPIPE and no message.
+  struct sigaction sa, old;
+  memset(&sa, 0, sizeof(sa));
+  sa.sa_handler = SIG_IGN;
+  sigemptyset(&sa.sa_mask);
+  sigaction(SIGPIPE, &sa, &old);
+  int fds[2];
+  CHECK(pipe(fds) == 0);
+  close(fds[0]);
+  pcap_dumper_t *dumper = pcap_dump_fopen(dead, fdopen(fds[1], "w"));
   CHECK(dumper != NULL);
   if (dumper) {
-    CHECK(check_output(dumper, "/dev/full", 1) < 0);
+    errno = 0;
+    CHECK(check_output(dumper, "pipe") == -EPIPE);
     pcap_dump_close(dumper);
   }
+  sigaction(SIGPIPE, &old, NULL);
+
   pcap_close(dead);
 }
 

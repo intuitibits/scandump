@@ -33,7 +33,9 @@ If
 .I filename
 is
 .BR \- ,
-the PCAP stream is written to standard output and flushed after each scan.
+the PCAP stream is written to standard output.
+Each scan's frames are written together, and flushed, once all of its
+results have been read, so the output only ever holds complete scans.
 .PP
 Each frame carries the BSSID, channel frequency and band, signal strength,
 beacon timestamp (TSF), beacon interval, capability information and the
@@ -50,7 +52,8 @@ scans repeatedly until it is interrupted with
 .B SIGINT
 or
 .BR SIGTERM ,
-at which point the output file is closed cleanly.
+at which point the output file is closed cleanly, or until the program
+reading its standard output closes the pipe.
 The output file is created only after the first scan succeeds.
 .SH OPTIONS
 .TP
@@ -123,14 +126,18 @@ and
 exits with a non\-zero status.
 .SH EXIT STATUS
 Transient scan failures (for example, the interface is busy because another
-process is scanning) are retried every 2 seconds, up to 30 times in a row.
+process is scanning, or the scan results could not be read) are retried
+every 2 seconds, up to 30 times in a row; a scan that failed is not counted
+towards
+.BR \-c .
 Errors are reported on standard error, followed by a hint for the common
 ones.
 .TP
 .B 0
 The requested number of scans completed, or
 .B scandump
-was interrupted.
+was interrupted, or the program reading its standard output closed the
+pipe.
 .TP
 .B 1
 Invalid arguments, or no interface with the given name.

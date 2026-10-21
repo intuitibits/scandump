@@ -37,8 +37,12 @@
 // elements come from a netlink attribute, which is less than 64 KiB.
 #define PCAP_SNAPLEN 262144
 
-// Initial size of the frame buffer, which grows to fit larger frames.
-#define MIN_FRAME_BUF_SIZE 2048
+// Initial size of the buffer holding a scan's frames, which grows as needed.
+#define MIN_FRAME_BUF_SIZE 16384
+
+// Times the scan results are read again when the kernel's results changed
+// while they were being read (-NLE_DUMP_INTR), before scanning again.
+#define MAX_DUMP_ATTEMPTS 3
 
 #define MAX_FREQS 100
 
@@ -303,12 +307,15 @@ struct trigger_results {
   int if_index;
 };
 
-// State shared by callback_dump() calls.
+// The frames of one scan, collected by callback_dump() and written by
+// write_frames() once all the results have been read, so that a scan whose
+// results can't be read in full leaves nothing in the output. `buf` holds
+// one record per frame: its length (a size_t) followed by the frame.
 struct dump_context {
-  pcap_dumper_t *dumper;
-  uint8_t *buf; // frame buffer, reused and grown as needed
+  uint8_t *buf; // reused and grown as needed
   size_t buf_size;
-  int err; // set to a negative errno when a frame could not be written
+  size_t len; // bytes of buf in use
+  int err;    // set to a negative errno when memory ran out
 };
 
 // Set from SIGINT/SIGTERM to request a clean shutdown.
@@ -512,7 +519,6 @@ static int callback_dump(struct nl_msg *msg, void *arg) {
   // Called by the kernel for each network found.
   struct genlmsghdr *gnlh = nlmsg_data(nlmsg_hdr(msg));
   struct dump_context *ctx = arg;
-  struct pcap_pkthdr header;
   struct nlattr *tb[NL80211_ATTR_MAX + 1];
   struct nlattr *bss[NL80211_BSS_MAX + 1];
   static struct nla_policy bss_policy[NL80211_BSS_MAX + 1] = {
@@ -593,34 +599,114 @@ static int callback_dump(struct nl_msg *msg, void *arg) {
     return NL_SKIP;
   }
 
-  // Grow the frame buffer if this frame doesn't fit.
-  if (len > ctx->buf_size) {
-    size_t size = len < MIN_FRAME_BUF_SIZE ? MIN_FRAME_BUF_SIZE : len;
-    uint8_t *buf = realloc(ctx->buf, size);
-    if (!buf) {
-      fprintf(stderr, "out of memory allocating a %zu-byte frame\n", size);
-      ctx->err = -ENOMEM;
-      return NL_STOP;
+  // Grow the buffer if this frame's record doesn't fit, at least doubling
+  // it so that a scan's frames take few reallocations.
+  if (len > SIZE_MAX - sizeof(size_t) - ctx->len) {
+    ctx->err = -ENOMEM;
+  } else if (ctx->len + sizeof(size_t) + len > ctx->buf_size) {
+    size_t need = ctx->len + sizeof(size_t) + len;
+    size_t size = ctx->buf_size < MIN_FRAME_BUF_SIZE ? MIN_FRAME_BUF_SIZE
+                                                     : ctx->buf_size;
+    while (size < need) {
+      size = size <= SIZE_MAX / 2 ? size * 2 : need;
     }
-    ctx->buf = buf;
-    ctx->buf_size = size;
+    uint8_t *buf = realloc(ctx->buf, size);
+    if (buf) {
+      ctx->buf = buf;
+      ctx->buf_size = size;
+    } else {
+      ctx->err = -ENOMEM;
+    }
+  }
+  if (ctx->err < 0) {
+    fprintf(stderr, "out of memory holding the scan results\n");
+    return NL_STOP;
   }
 
-  build_frame(&frame, ctx->buf);
-
-  // The whole frame is written, so the captured and original lengths match.
-  header.caplen = (bpf_u_int32)len;
-  header.len = (bpf_u_int32)len;
-  // The time the frame is written, not when it was received: see the
-  // limitations in scandump(8). Records stay in order that way, which
-  // receive times can't guarantee, since the kernel's scan results include
-  // networks last heard before this scan, until they expire.
-  gettimeofday(&(header.ts), NULL);
-
-  // Write packet out.
-  pcap_dump((u_char *)ctx->dumper, &header, ctx->buf);
+  memcpy(ctx->buf + ctx->len, &len, sizeof(size_t));
+  build_frame(&frame, ctx->buf + ctx->len + sizeof(size_t));
+  ctx->len += sizeof(size_t) + len;
 
   return NL_SKIP;
+}
+
+// Writes the frames collected in `ctx` to `dumper`.
+static void write_frames(struct dump_context *ctx, pcap_dumper_t *dumper) {
+
+  size_t off = 0;
+  while (off < ctx->len) {
+    size_t len;
+    memcpy(&len, ctx->buf + off, sizeof(size_t));
+    off += sizeof(size_t);
+
+    // The whole frame is written, so the captured and original lengths
+    // match. The timestamp is when the frame is written, not when it was
+    // received: see the limitations in scandump(8). Records stay in order
+    // that way, which receive times can't guarantee, since the kernel's scan
+    // results include networks last heard before this scan, until they
+    // expire.
+    struct pcap_pkthdr header = {.caplen = (bpf_u_int32)len,
+                                 .len = (bpf_u_int32)len};
+    gettimeofday(&header.ts, NULL);
+    pcap_dump((u_char *)dumper, &header, ctx->buf + off);
+    off += len;
+  }
+}
+
+// Reads the scan results into `ctx`, replacing what it held. Results that
+// changed while being read (-NLE_DUMP_INTR) are read again, up to
+// MAX_DUMP_ATTEMPTS times. Returns 0 on success, -ECANCELED if a stop signal
+// was received, or another negative error, already reported, if the results
+// could not be read; ctx->err is set too if that was for lack of memory.
+static int do_scan_dump(struct nl_sock *sk, int if_index, int genl_id,
+                        struct dump_context *ctx) {
+
+  int ret = 0;
+  for (int attempt = 0; attempt < MAX_DUMP_ATTEMPTS; attempt++) {
+    ctx->len = 0;
+
+    struct nl_msg *msg = nlmsg_alloc();
+    if (!msg || !genlmsg_put(msg, 0, 0, genl_id, 0, NLM_F_DUMP,
+                             NL80211_CMD_GET_SCAN, 0) ||
+        nla_put_u32(msg, NL80211_ATTR_IFINDEX, if_index) < 0) {
+      fprintf(stderr, "nl80211: failed to build scan results request\n");
+      nlmsg_free(msg);
+      ctx->err = -ENOMEM;
+      return -ENOMEM;
+    }
+
+    nl_socket_modify_cb(sk, NL_CB_VALID, NL_CB_CUSTOM, callback_dump, ctx);
+    ret = nl_send_auto(sk, msg);
+    nlmsg_free(msg);
+    if (ret < 0) {
+      fprintf(stderr, "nl80211: %s (%d)\n", nl_geterror(ret), ret);
+      return ret;
+    }
+
+    ret = nl_wait_readable(sk, NL_RECV_TIMEOUT_SEC);
+    if (ret < 0) {
+      report_recv_error(ret);
+      return ret;
+    }
+
+    // Reads until the end of the dump. libnl reads an interrupted dump to
+    // its end too, so nothing is left behind for the next read.
+    ret = nl_recvmsgs_default(sk);
+    if (ctx->err < 0) {
+      return ctx->err;
+    }
+    if (ret != -NLE_DUMP_INTR) {
+      break;
+    }
+  }
+
+  if (ret < 0) {
+    fprintf(stderr, "nl80211: reading scan results: %s (%d)\n",
+            nl_geterror(ret), ret);
+    return ret;
+  }
+
+  return 0;
 }
 
 static int do_scan_trigger(struct nl_sock *sk, int if_index, int genl_id,
@@ -837,18 +923,22 @@ static FILE *open_output_file(const char *file) {
   return fp;
 }
 
-// Reports whether everything written to the output so far reached it.
-// pcap_dump() cannot report errors and pcap_dump_close() returns nothing, so
-// a full disk or a closed pipe is only noticed through the stream's error
-// flag. With `flush`, buffered packets are written out first, so the check
-// covers them too. Returns 0 on success; prints a diagnostic and returns -1
-// on failure.
-static int check_output(pcap_dumper_t *dumper, const char *name, int flush) {
+// Flushes the output and reports whether everything written to it so far
+// reached it. pcap_dump() cannot report errors and pcap_dump_close() returns
+// nothing, so a full disk or a closed pipe is only noticed through the
+// stream's error flag. The caller sets errno to 0 before writing, so that the
+// cause of a failed write is still in errno here. Returns 0 on success,
+// -EPIPE without a message if the output is a pipe or FIFO whose reader has
+// gone (SIGPIPE is ignored), or -1 after printing a diagnostic for any other
+// failure.
+static int check_output(pcap_dumper_t *dumper, const char *name) {
 
-  errno = 0;
-  if ((!flush || pcap_dump_flush(dumper) == 0) &&
-      !ferror(pcap_dump_file(dumper))) {
+  if (pcap_dump_flush(dumper) == 0 && !ferror(pcap_dump_file(dumper))) {
     return 0;
+  }
+
+  if (errno == EPIPE) {
+    return -EPIPE;
   }
 
   fprintf(stderr, "%s: %s\n", name,
@@ -967,6 +1057,15 @@ int main(int argc, char *argv[]) {
     return EXIT_RUNTIME_ERROR;
   }
 
+  // A reader that closes the pipe it reads the PCAP stream from, such as
+  // "tcpdump -c 5", makes the next write fail with EPIPE instead of killing
+  // scandump, which then stops as if interrupted (see check_output()).
+  sa.sa_handler = SIG_IGN;
+  if (sigaction(SIGPIPE, &sa, NULL) < 0) {
+    fprintf(stderr, "sigaction: %s\n", strerror(errno));
+    return EXIT_RUNTIME_ERROR;
+  }
+
   sk = nl_socket_alloc();
   if (!sk) {
     fprintf(stderr, "nl80211: %s (%d)\n", strerror(errno), errno);
@@ -1001,6 +1100,7 @@ int main(int argc, char *argv[]) {
 
   int n = 0;
   int transient_retries = 0;
+  int output_closed = 0;
   while (((count == 0) || (n < count)) && !g_stop) {
 
     // Trigger scan and wait for it to finish
@@ -1011,15 +1111,32 @@ int main(int argc, char *argv[]) {
       break;
     }
 
-    if (trigger_err != 0) {
+    // Read the networks found. A scan whose results can't be read in full
+    // writes nothing and doesn't count; it is retried like a busy interface.
+    int dump_failed = 0;
+    if (trigger_err == 0) {
+      int dump_err = do_scan_dump(sk, if_index, genl_id, &dump_ctx);
+      if (dump_ctx.err < 0) {
+        exit_code = EXIT_RUNTIME_ERROR;
+        goto cleanup;
+      }
+      if (dump_err == -ECANCELED) {
+        break;
+      }
+      dump_failed = dump_err < 0;
+    }
+
+    if (trigger_err != 0 || dump_failed) {
       // Netlink failures arrive as libnl codes (-NLE_*), not errno values.
       // The interface being busy (-NLE_BUSY, -25, the kernel's EBUSY while
       // another scan runs), an interrupted dump (-NLE_DUMP_INTR, -33) and a
       // sequence mismatch (-NLE_SEQ_MISMATCH, -16) can happen for various
       // reasons when doing a scan, but we can simply retry. So can a timeout
-      // waiting for the kernel (-ETIMEDOUT, from poll()).
-      if (trigger_err == -NLE_BUSY || trigger_err == -NLE_DUMP_INTR ||
-          trigger_err == -NLE_SEQ_MISMATCH || trigger_err == -ETIMEDOUT) {
+      // waiting for the kernel (-ETIMEDOUT, from poll()), and failing to
+      // read the results.
+      if (dump_failed || trigger_err == -NLE_BUSY ||
+          trigger_err == -NLE_DUMP_INTR || trigger_err == -NLE_SEQ_MISMATCH ||
+          trigger_err == -ETIMEDOUT) {
         if (++transient_retries > MAX_TRANSIENT_RETRIES) {
           fprintf(stderr,
                   "nl80211: giving up after %d consecutive transient errors\n",
@@ -1067,60 +1184,20 @@ int main(int argc, char *argv[]) {
         exit_code = EXIT_RUNTIME_ERROR;
         goto cleanup;
       }
-      dump_ctx.dumper = dumper;
     }
 
-    // Dump networks found into file.
-    struct nl_msg *msg = nlmsg_alloc();
-    if (!msg) {
-      fprintf(stderr, "nl80211: failed to allocate netlink message\n");
-      exit_code = EXIT_RUNTIME_ERROR;
-      goto cleanup;
+    // Write the scan's frames and flush them, to a file as well as to
+    // stdout, so that each finished scan is in the output even if scandump
+    // is killed later. Stop on a write error rather than keep scanning into
+    // a broken output, and quietly if the reader closed the pipe.
+    errno = 0;
+    write_frames(&dump_ctx, dumper);
+    err = check_output(dumper, output_name);
+    if (err == -EPIPE) {
+      output_closed = 1;
+      break;
     }
-
-    if (!genlmsg_put(msg, 0, 0, genl_id, 0, NLM_F_DUMP, NL80211_CMD_GET_SCAN,
-                     0)) {
-      fprintf(stderr, "nl80211: failed to build scan results request\n");
-      nlmsg_free(msg);
-      exit_code = EXIT_RUNTIME_ERROR;
-      goto cleanup;
-    }
-
-    int ret = nla_put_u32(msg, NL80211_ATTR_IFINDEX, if_index);
-    if (ret < 0) {
-      fprintf(stderr, "nl80211: %s (%d)\n", nl_geterror(ret), ret);
-      nlmsg_free(msg);
-      exit_code = EXIT_RUNTIME_ERROR;
-      goto cleanup;
-    }
-
-    nl_socket_modify_cb(sk, NL_CB_VALID, NL_CB_CUSTOM, callback_dump,
-                        &dump_ctx);
-    ret = nl_send_auto(sk, msg);
-    if (ret < 0) {
-      fprintf(stderr, "warning: %s (%d)\n", nl_geterror(ret), ret);
-    } else {
-      ret = nl_wait_readable(sk, NL_RECV_TIMEOUT_SEC);
-      if (ret < 0) {
-        report_recv_error(ret);
-      } else {
-        ret = nl_recvmsgs_default(sk);
-        if (ret < 0) {
-          fprintf(stderr, "warning: %s (%d)\n", nl_geterror(ret), ret);
-        }
-      }
-    }
-    nlmsg_free(msg);
-
-    if (dump_ctx.err < 0) {
-      exit_code = EXIT_RUNTIME_ERROR;
-      goto cleanup;
-    }
-
-    // Only flush when streaming to stdout, where a consumer is waiting for
-    // the data; file output is flushed before it is closed below. Either way,
-    // stop on a write error rather than keep scanning into a broken output.
-    if (check_output(dumper, output_name, to_stdout) < 0) {
+    if (err < 0) {
       exit_code = EXIT_RUNTIME_ERROR;
       goto cleanup;
     }
@@ -1143,8 +1220,11 @@ int main(int argc, char *argv[]) {
 
 cleanup:
   if (dumper) {
-    // Skipped after an earlier error, which has been reported already.
-    if (exit_code == 0 && check_output(dumper, output_name, 1) < 0) {
+    // Skipped after an earlier error, which has been reported already, and
+    // when the reader has gone.
+    errno = 0;
+    if (exit_code == 0 && !output_closed &&
+        check_output(dumper, output_name) == -1) {
       exit_code = EXIT_RUNTIME_ERROR;
     }
     pcap_dump_close(dumper);
