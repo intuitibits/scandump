@@ -1,6 +1,6 @@
 Name:           scandump
 Version:        2.3.0
-Release:        2%{?dist}
+Release:        1%{?dist}
 Summary:        Command-line utility that writes Wi-Fi scan results in PCAP format
 
 License:        GPL-3.0-only
@@ -52,8 +52,5 @@ package does not grant either; see the README for setup options.
 
 
 %changelog
-* Wed Oct 21 2026 Adrian Granados <support@intuitibits.com> - 2.3.0-2
-- Reword the summary
-
 * Tue Oct 20 2026 Adrian Granados <support@intuitibits.com> - 2.3.0-1
 - Initial package
