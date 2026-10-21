@@ -1,0 +1,148 @@
+# Build and packaging checks. Nothing here needs Wi-Fi hardware or root on a
+# real system, and nothing is published: packages are only kept as workflow
+# artifacts for inspection.
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build (${{ matrix.cc }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends \
+            clang pkgconf libnl-3-dev libnl-genl-3-dev libpcap-dev
+      - name: Build (warnings are errors)
+        run: make CC=${{ matrix.cc }}
+      - run: ./scandump --version
+      - name: Staged install and uninstall
+        run: |
+          stage="$RUNNER_TEMP/stage"
+          make install DESTDIR="$stage"
+          test -x "$stage/usr/bin/scandump"
+          test -f "$stage/usr/share/man/man8/scandump.8"
+          make uninstall DESTDIR="$stage"
+          test -z "$(find "$stage" -type f)"
+
+  release-tarball:
+    name: Build from release tarball
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends \
+            pkgconf libnl-3-dev libnl-genl-3-dev libpcap-dev
+      - name: make dist, then build outside the Git checkout
+        run: |
+          make dist
+          version=$(sed -n 's/^#define VERSION "\(.*\)"/\1/p' scandump.c)
+          tar -C "$RUNNER_TEMP" -xzf "scandump-$version.tar.gz"
+          cd "$RUNNER_TEMP/scandump-$version"
+          test ! -e debian
+          make
+          ./scandump --version | grep -qx "scandump version $version"
+          make install DESTDIR="$RUNNER_TEMP/stage"
+
+  static-analysis:
+    name: Static analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends \
+            pkgconf libnl-3-dev libnl-genl-3-dev libpcap-dev cppcheck mandoc
+      - name: cppcheck
+        run: |
+          cppcheck --enable=warning,portability --std=c99 --quiet \
+            --error-exitcode=1 --suppress=missingIncludeSystem \
+            -I/usr/include/libnl3 scandump.c
+      - name: GCC static analyzer
+        run: make CFLAGS="-O2 -fanalyzer"
+      - name: Manual page lint
+        run: mandoc -Tlint -W warning scandump.8
+
+  debian:
+    name: Debian package (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Debian's development release: lintian must be warning-free.
+          - image: debian:sid
+            artifact: deb-debian-sid
+            lintian-fail-on: error,warning
+          # Older lintian versions warn about a Standards-Version they don't
+          # know yet, so these only fail on errors.
+          - image: debian:trixie
+            artifact: deb-debian-trixie
+            lintian-fail-on: error
+          - image: debian:bookworm
+            artifact: deb-debian-bookworm
+            lintian-fail-on: error
+          - image: ubuntu:22.04
+            artifact: deb-ubuntu-22.04
+            lintian-fail-on: error
+          - image: ubuntu:24.04
+            artifact: deb-ubuntu-24.04
+            lintian-fail-on: error
+          - image: ubuntu:26.04
+            artifact: deb-ubuntu-26.04
+            lintian-fail-on: error
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build, lint, install, test, remove
+        run: sh packaging/ci/build-deb.sh
+        env:
+          LINTIAN_FAIL_ON: ${{ matrix.lintian-fail-on }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact }}
+          path: out/deb/
+
+  arch:
+    name: Arch Linux package
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: makepkg, namcap, install, remove
+        run: sh packaging/ci/build-arch.sh
+      - uses: actions/upload-artifact@v7
+        with:
+          name: arch
+          path: |
+            out/arch/
+            !out/arch/*-debug-*
+
+  fedora:
+    name: Fedora package
+    runs-on: ubuntu-latest
+    container: fedora:latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: rpmbuild, rpmlint, install, remove
+        run: sh packaging/ci/build-rpm.sh
+      - uses: actions/upload-artifact@v7
+        with:
+          name: fedora
+          path: out/rpm/

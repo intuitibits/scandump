@@ -14,17 +14,26 @@ to scrape `iw`'s text output. It is a single-file C program (`scandump.c`).
 ```shell
 make            # builds ./scandump
 make clean      # removes build artifacts
-sudo make install   # installs to $(DESTDIR)/usr/bin
+sudo make install   # installs scandump and scandump.8 under $(DESTDIR)$(PREFIX) (default /usr)
+sudo make uninstall
+make dist       # scandump-$(VERSION).tar.gz from HEAD (excludes debian/)
 ```
 
-Build dependencies (Debian/Ubuntu): `libnl-genl-3-dev`, `libnl-3-dev`, `libpcap-dev`, `build-essential`.
+Build dependencies (Debian/Ubuntu): `libnl-genl-3-dev`, `libnl-3-dev`, `libpcap-dev`, `pkg-config`, `build-essential`.
 
-Compiler flags are strict: `-Wall -Werror -std=c99` (see `Makefile`). Warnings
-fail the build, so treat any new warning as a bug to fix, not suppress.
+Compiler flags are strict: `-Wall -Wextra ... -Werror -std=c99` (see
+`Makefile`). Warnings fail the build, so treat any new warning as a bug to fix,
+not suppress. Only distribution packaging passes `WERROR=` to drop `-Werror`.
+The Makefile appends its flags to the environment's `CFLAGS`/`CPPFLAGS`/
+`LDFLAGS`/`LDLIBS` and gets library flags from pkg-config; keep it that way so
+distro build systems keep working.
 
-There is no test suite. Verifying changes generally means building and running
-`scandump` against a real wireless interface (requires root and a Linux host
-with `nl80211` support — this won't run/test on macOS).
+There is no unit test suite. Verifying behavior changes means building and
+running `scandump` against a real wireless interface (requires root and a Linux
+host with `nl80211` support — this won't run/test on macOS), or the manually
+triggered `.github/workflows/functional.yml`, which scans `mac80211_hwsim`
+radios. Build and packaging checks run in containers via `packaging/ci/*.sh`
+(see `packaging/README.md`) and in `.github/workflows/ci.yml`.
 
 ```shell
 sudo ./scandump wlan0 scan.pcap        # capture to a file
@@ -36,11 +45,23 @@ sudo ./scandump -c 5 wlan0 scan.pcap   # stop after 5 scans
 
 ## Packaging
 
-Debian packaging lives under `debian/` (standard `dh $@` rules). The package
-installs a sudoers rule (`etc/sudoers.d/scandump`) granting the `sudo` group
-passwordless execution of `/usr/bin/scandump`, since scanning requires root.
-Keep `debian/changelog` and `VERSION` (in `scandump.c`) in sync when cutting a
-release.
+- `debian/` is the Debian/Ubuntu source package (`3.0 (quilt)`, maintainer
+  `Adrian Granados <support@intuitibits.com>`). `.gitattributes` keeps it out
+  of release tarballs.
+- `packaging/arch/PKGBUILD` and `packaging/fedora/scandump.spec` hold the
+  Arch and Fedora packaging.
+- Keep this repository to public, user- or contributor-relevant material:
+  source, build files, packaging and their docs. Release checklists,
+  submission notes and security reviews are kept outside the repository.
+- No package may grant privileges: no sudoers rule, setuid bit, file
+  capability or maintainer script. The CI scripts enforce this. The
+  passwordless-sudo rule ships only as `examples/sudoers`, because it lets
+  any `sudo`-group user overwrite any file as root (see *Permissions* in
+  `README.md`).
+- When cutting a release, keep the version in sync across `VERSION` in
+  `scandump.c`, `scandump.8`, `CHANGELOG.md`, `debian/changelog`, the spec
+  and the PKGBUILD.
+- Copyright is `Intuitibits LLC` and the license is GPL-3.0-only.
 
 ## Architecture
 
@@ -54,11 +75,18 @@ Everything is in `scandump.c` and follows one flow:
    kernel reports `NL80211_CMD_NEW_SCAN_RESULTS` or
    `NL80211_CMD_SCAN_ABORTED` via `callback_trigger`. Passive scan (`-p`)
    simply omits the SSID attribute.
-3. **Retry policy** (`main`'s scan loop): `-EBUSY`, `-ENOTTY`, and `-EDOM`
-   from `do_scan_trigger` are treated as transient (another process may be
-   scanning) and retried after a `sleep(2)`; any other error is fatal. A
-   scan that comes back `aborted` is logged and the loop continues rather
-   than exiting.
+3. **Retry policy** (`main`'s scan loop): `-NLE_BUSY`, `-NLE_DUMP_INTR`,
+   `-NLE_SEQ_MISMATCH` and `-ETIMEDOUT` from `do_scan_trigger` are treated
+   as transient (another process may be scanning) and retried after a
+   `sleep(2)`; any other error is fatal. A scan that comes back `aborted` is
+   logged and the loop continues rather than exiting. Netlink failures are
+   libnl `-NLE_*` codes, not errnos (the kernel's `EBUSY` arrives as
+   `-NLE_BUSY`); only local failures such as the `poll()` timeout are
+   `-errno`. Keep the two apart when touching this logic. Exit statuses are
+   a public interface (callers map 225 and 240 to specific errors): 1 for
+   usage, 240 when retries run out, 255 for other failures,
+   and `256 + err` for a fatal scan error. They are documented in
+   `scandump.8`; don't change them.
 4. **Dump scan results** (`callback_dump`): once a scan completes, sends
    `NL80211_CMD_GET_SCAN` and, for each BSS the kernel reports, synthesizes a
    fake over-the-air frame:
@@ -78,7 +106,9 @@ Everything is in `scandump.c` and follows one flow:
 5. **Output**: PCAP data is written via libpcap (`pcap_dump_open`/
    `pcap_dump_fopen`), to a file or to stdout when the filename is `-`.
    `DLT_IEEE802_11_RADIO` is the link type, matching the synthesized
-   radiotap-prefixed frames.
+   radiotap-prefixed frames. `pcap_dump()` can't report errors, so
+   `check_output` checks the stream after each scan and before closing;
+   a write error stops the loop with a non-zero exit.
 
 The scan loop in `main` repeats indefinitely unless `-c/--count` is given, and
 the pcap dumper is opened lazily (only after the first successful scan) so no

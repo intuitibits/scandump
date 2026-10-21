@@ -1,4 +1,14 @@
 #!/usr/bin/make -f
 
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+
 %:
 	dh $@
+
+# Keep warnings as warnings: a newer compiler must not make the package
+# fail to build.
+override_dh_auto_build:
+	dh_auto_build -- WERROR=
+
+override_dh_auto_install:
+	dh_auto_install -- PREFIX=/usr

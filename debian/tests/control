@@ -1,0 +1,8 @@
+# Scanning needs real Wi-Fi hardware and CAP_NET_ADMIN, which test beds
+# don't provide, so only check that the installed binary starts and
+# rejects bad input.
+Test-Command: scandump --version | grep -qx "scandump version $(dpkg-query -W -f '${source:Upstream-Version}' scandump)"
+Restrictions: superficial
+
+Test-Command: ! scandump -c bogus wlan0 out.pcap 2>/dev/null && ! scandump nonexistent0 out.pcap 2>/dev/null && test ! -e out.pcap
+Restrictions: superficial

@@ -1,0 +1,2 @@
+# Technical terms missing from the spelling dictionary.
+addFilter(r"spelling-error \('(Wi|netlink|radiotap|tcpdump|iw)',")

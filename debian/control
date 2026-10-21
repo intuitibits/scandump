@@ -1,16 +1,33 @@
 Source: scandump
 Section: net
 Priority: optional
-Maintainer: Adrian Granados <adrian@intuitibits.com>
+Maintainer: Adrian Granados <support@intuitibits.com>
 Build-Depends:
-  libnl-3-dev (>= 3.2.3-2~),
-  libnl-genl-3-dev (>= 3.2.3-2~),
-  libpcap-dev
+ debhelper-compat (= 13),
+ libnl-3-dev,
+ libnl-genl-3-dev,
+ libpcap-dev,
+ pkgconf,
+Standards-Version: 4.7.4
+Homepage: https://github.com/intuitibits/scandump
+Vcs-Browser: https://github.com/intuitibits/scandump
 Vcs-Git: https://github.com/intuitibits/scandump.git
-Rules-Requires-Root: no
 
 Package: scandump
 Architecture: linux-any
-Depends: ${shlibs:Depends}, ${misc:Depends}
-Description: A command line utility that scans for wireless networks 
- using the 802.11 netlink API and outputs the scan results in PCAP format.
+Depends:
+ ${misc:Depends},
+ ${shlibs:Depends},
+Description: Wi-Fi scanner that writes scan results in PCAP format
+ scandump triggers a Wi-Fi scan through the Linux 802.11 netlink API
+ (nl80211) and writes every network found as a synthetic radiotap and
+ 802.11 beacon frame to a PCAP file or to standard output.
+ .
+ This lets scripts and tools consume scan results with any PCAP reader,
+ such as tcpdump or Wireshark, instead of parsing the text output of iw,
+ and works with wireless interfaces that do not support monitor mode.
+ Active and passive scans and restricting the scan to a list of
+ frequencies are supported.
+ .
+ Triggering a scan requires root or the CAP_NET_ADMIN capability. The
+ package does not grant either; see the README for setup options.
