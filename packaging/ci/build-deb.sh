@@ -35,9 +35,14 @@ cd "$work"
 
 echo "--- lintian"
 # Older releases' lintian flag a Standards-Version newer than they know, so
-# CI relaxes LINTIAN_FAIL_ON there; sid must be warning-free.
+# CI relaxes LINTIAN_FAIL_ON there; sid must be warning-free. Ubuntu's
+# lintian rejects the changelog's Debian distribution (unstable).
+suppress=new-package-should-close-itp-bug
+if grep -qx 'ID=ubuntu' /etc/os-release; then
+  suppress=$suppress,bad-distribution-in-changes-file
+fi
 lintian --info --display-info --pedantic --fail-on "${LINTIAN_FAIL_ON:-error,warning}" \
-  --suppress-tags new-package-should-close-itp-bug \
+  --suppress-tags "$suppress" \
   ./*.changes
 
 echo "--- install / run / remove"
