@@ -29,8 +29,8 @@ docker run --rm --platform linux/amd64 -v "$PWD":/src:ro -v "$PWD/out":/out -e O
 For Debian/Ubuntu releases older than sid, add `-e LINTIAN_FAIL_ON=error`:
 their lintian warns about a `Standards-Version` newer than it knows.
 
-CI (`.github/workflows/ci.yml`) runs the same scripts on every push and pull
-request, plus GCC and Clang builds with `-Werror`, a build from `make dist`
+CI (`.github/workflows/ci.yml`) runs the same scripts on every pull request
+and push to `main`, plus GCC and Clang builds with `-Werror`, a build from `make dist`
 outside the Git checkout, cppcheck, `gcc -fanalyzer` and mandoc lint.
 Packages are kept as workflow artifacts and never published.
 `.github/workflows/functional.yml` runs real scans against simulated radios

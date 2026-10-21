@@ -4,7 +4,10 @@
 name: CI
 
 on:
+  # Other branches are checked through their pull requests, so each change
+  # runs once rather than once per push and once per PR.
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
