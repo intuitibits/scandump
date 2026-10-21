@@ -28,10 +28,17 @@ jobs:
           sudo apt-get update -q
           sudo apt-get install -y -q --no-install-recommends \
             pkgconf libnl-3-dev libnl-genl-3-dev libpcap-dev \
-            hostapd iw tcpdump libcap2-bin "linux-modules-extra-$(uname -r)"
+            hostapd iw tcpdump libcap2-bin
       - run: make
       - name: Create two virtual radios and an access point
         run: |
+          # The module is in linux-modules-extra on some runner kernels and
+          # in the base modules on others; that package doesn't exist for
+          # every kernel, so only install it if the module is missing.
+          if ! modinfo mac80211_hwsim > /dev/null 2>&1; then
+            sudo apt-get install -y -q --no-install-recommends \
+              "linux-modules-extra-$(uname -r)"
+          fi
           sudo modprobe mac80211_hwsim radios=2
           iw dev
           printf '%s\n' interface=wlan0 driver=nl80211 "ssid=$SSID" \
