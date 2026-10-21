@@ -112,6 +112,12 @@ jobs:
             artifact: deb-ubuntu-26.04
             lintian-fail-on: error
     steps:
+      # Without git in the container, checkout downloads a GitHub archive,
+      # which honors .gitattributes export-ignore and so has no debian/.
+      - name: Install git
+        run: |
+          apt-get update -q
+          apt-get install -y -q --no-install-recommends git ca-certificates
       - uses: actions/checkout@v7
       - name: Build, lint, install, test, remove
         run: sh packaging/ci/build-deb.sh
