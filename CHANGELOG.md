@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.3.0 — unreleased
+## 2.3.0 — 2026-10-21
 
 Packaging and documentation release, with a new `-i`/`--interval` option
 and fixes to the PCAP output.
