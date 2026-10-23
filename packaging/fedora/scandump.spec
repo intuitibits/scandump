@@ -30,6 +30,11 @@ package does not grant either; see the README for setup options.
 
 
 %build
+# EL9 predates the Fedora 36 change that sets the build flags in %%build
+# and %%check: https://fedoraproject.org/wiki/Changes/SetBuildFlagsBuildCheck
+%if 0%{?el9}
+%set_build_flags
+%endif
 %make_build WERROR=
 
 
@@ -38,6 +43,9 @@ package does not grant either; see the README for setup options.
 
 
 %check
+%if 0%{?el9}
+%set_build_flags
+%endif
 %make_build check WERROR=
 ./scandump --version | grep -qx "scandump version %{version}"
 
@@ -51,7 +59,7 @@ package does not grant either; see the README for setup options.
 
 %changelog
 * Fri Oct 23 2026 Adrian Granados <support@intuitibits.com> - 2.3.0-2
-- Drop redundant %%set_build_flags (review feedback)
+- Call %%set_build_flags only on EL9 (review feedback)
 
 * Tue Oct 20 2026 Adrian Granados <support@intuitibits.com> - 2.3.0-1
 - Initial package
