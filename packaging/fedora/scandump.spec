@@ -30,7 +30,6 @@ package does not grant either; see the README for setup options.
 
 
 %build
-%set_build_flags
 %make_build WERROR=
 
 
@@ -39,7 +38,6 @@ package does not grant either; see the README for setup options.
 
 
 %check
-%set_build_flags
 %make_build check WERROR=
 ./scandump --version | grep -qx "scandump version %{version}"
 
