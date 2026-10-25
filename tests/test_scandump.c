@@ -598,6 +598,10 @@ static void test_exit_status(void) {
   CHECK(exit_status_for_error(0) == EXIT_RUNTIME_ERROR);
 }
 
+static void ignore_signal(int signum) {
+  (void)signum;
+}
+
 // A write error (here, a full device) is reported rather than lost, and a
 // reader closing the pipe is told apart from it.
 static void test_output_errors(void) {
@@ -636,6 +640,33 @@ static void test_output_errors(void) {
   }
   sigaction(SIGPIPE, &old, NULL);
 
+  // A stop signal that interrupts a write blocked on a full pipe is a stop,
+  // reported as -ECANCELED and no message, not a write error. SIGALRM
+  // (installed without SA_RESTART, like main()'s handlers) stands in for
+  // the signal, with g_stop already set.
+  CHECK(pipe(fds) == 0);
+  int flags = fcntl(fds[1], F_GETFL);
+  fcntl(fds[1], F_SETFL, flags | O_NONBLOCK);
+  char fill[4096] = {0};
+  while (write(fds[1], fill, sizeof(fill)) > 0) {
+  }
+  fcntl(fds[1], F_SETFL, flags);
+  dumper = pcap_dump_fopen(dead, fdopen(fds[1], "w"));
+  CHECK(dumper != NULL);
+  if (dumper) {
+    sa.sa_handler = ignore_signal;
+    sigaction(SIGALRM, &sa, &old);
+    struct itimerval timer = {.it_value = {.tv_usec = 100000}};
+    setitimer(ITIMER_REAL, &timer, NULL);
+    g_stop = 1;
+    errno = 0;
+    CHECK(check_output(dumper, "pipe") == -ECANCELED);
+    g_stop = 0;
+    pcap_dump_close(dumper);
+    sigaction(SIGALRM, &old, NULL);
+  }
+  close(fds[0]);
+
   pcap_close(dead);
 }
 
@@ -649,10 +680,6 @@ static double elapsed_since(const struct timespec *start) {
 static void raise_stop_signal(int signum) {
   (void)signum;
   raise(SIGTERM);
-}
-
-static void ignore_signal(int signum) {
-  (void)signum;
 }
 
 static void test_wait(void) {
