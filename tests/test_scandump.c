@@ -18,6 +18,8 @@
 #include "../scandump.c"
 #undef main
 
+#include <sys/wait.h>
+
 static int failures = 0;
 
 #define CHECK(cond)                                                          \
@@ -639,6 +641,65 @@ static void test_output_errors(void) {
   pcap_close(dead);
 }
 
+// A stop signal while a write to a pipe is blocked exits with status 0, even
+// when part of the write went through and the C library would retry the
+// rest. The child writes a frame much larger than the space left free in a
+// pipe nobody reads, so a write goes through in part and then blocks.
+static void test_stop_during_blocked_write(void) {
+
+  int fds[2];
+  CHECK(pipe(fds) == 0);
+  int flags = fcntl(fds[1], F_GETFL);
+  fcntl(fds[1], F_SETFL, flags | O_NONBLOCK);
+  static char buf[16384];
+  while (write(fds[1], buf, sizeof(buf)) > 0) {
+  }
+  fcntl(fds[1], F_SETFL, flags);
+  CHECK(read(fds[0], buf, sizeof(buf)) == sizeof(buf));
+
+  pid_t pid = fork();
+  CHECK(pid >= 0);
+  if (pid == 0) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = handle_stop_signal;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGTERM, &sa, NULL);
+    close(fds[0]);
+    pcap_t *dead = pcap_open_dead(DLT_IEEE802_11_RADIO, PCAP_SNAPLEN);
+    pcap_dumper_t *dumper = pcap_dump_fopen(dead, fdopen(fds[1], "w"));
+    if (!dumper || !output_can_block(dumper)) {
+      _exit(2);
+    }
+    static u_char frame[100000];
+    struct pcap_pkthdr hdr = {.caplen = sizeof(frame), .len = sizeof(frame)};
+    g_exit_on_stop = 1;
+    pcap_dump((u_char *)dumper, &hdr, frame);
+    check_output(dumper, "pipe");
+    _exit(3); // not reached while the pipe isn't read
+  }
+  close(fds[1]);
+
+  // Give the child time to block, then stop it and allow 5 s to exit.
+  struct timespec pause = {.tv_nsec = 200000000L};
+  nanosleep(&pause, NULL);
+  kill(pid, SIGTERM);
+  int status = 0;
+  pid_t done = 0;
+  for (int i = 0; i < 500 && done == 0; i++) {
+    pause.tv_nsec = 10000000L;
+    nanosleep(&pause, NULL);
+    done = waitpid(pid, &status, WNOHANG);
+  }
+  if (done == 0) {
+    kill(pid, SIGKILL);
+    waitpid(pid, &status, 0);
+  }
+  CHECK(done == pid);
+  CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+  close(fds[0]);
+}
+
 static double elapsed_since(const struct timespec *start) {
   struct timespec now;
   clock_gettime(CLOCK_MONOTONIC, &now);
@@ -751,6 +812,7 @@ int main(int argc, char *argv[]) {
   test_parsing();
   test_exit_status();
   test_output_errors();
+  test_stop_during_blocked_write();
   test_wait();
   if (argc > 1) {
     write_sample(argv[1]);

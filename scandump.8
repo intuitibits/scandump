@@ -54,6 +54,10 @@ or
 .BR SIGTERM ,
 at which point the output file is closed cleanly, or until the program
 reading its standard output closes the pipe.
+If the output is not a regular file, such as a pipe, and the signal arrives
+while a scan is being written,
+.B scandump
+exits at once, so the last scan in the output may be incomplete.
 The output file is created only after the first scan succeeds.
 .SH OPTIONS
 .TP
