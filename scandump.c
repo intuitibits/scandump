@@ -23,6 +23,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
@@ -321,9 +322,27 @@ struct dump_context {
 // Set from SIGINT/SIGTERM to request a clean shutdown.
 static volatile sig_atomic_t g_stop = 0;
 
+// Set while writing to an output that isn't a regular file, such as a pipe,
+// where a write blocks for as long as the reader doesn't read. The C library
+// retries a partial write without returning, so g_stop would not be seen;
+// a stop signal then exits at once instead, cutting off the scan being
+// written, which the reader wasn't taking anyway.
+static volatile sig_atomic_t g_exit_on_stop = 0;
+
 static void handle_stop_signal(int signum) {
   (void)signum;
+  if (g_exit_on_stop) {
+    _exit(0);
+  }
   g_stop = 1;
+}
+
+// Returns 1 if the output can block indefinitely: anything but a regular
+// file, such as a pipe, FIFO, socket or terminal.
+static int output_can_block(pcap_dumper_t *dumper) {
+  struct stat st;
+  return fstat(fileno(pcap_dump_file(dumper)), &st) == 0 &&
+         !S_ISREG(st.st_mode);
 }
 
 static int error_handler(struct sockaddr_nl *nla, struct nlmsgerr *err,
@@ -929,9 +948,8 @@ static FILE *open_output_file(const char *file) {
 // stream's error flag. The caller sets errno to 0 before writing, so that the
 // cause of a failed write is still in errno here. Returns 0 on success,
 // -EPIPE without a message if the output is a pipe or FIFO whose reader has
-// gone (SIGPIPE is ignored), -ECANCELED without a message if a stop signal
-// interrupted a write blocked on a reader that isn't reading, or -1 after
-// printing a diagnostic for any other failure.
+// gone (SIGPIPE is ignored), or -1 after printing a diagnostic for any other
+// failure.
 static int check_output(pcap_dumper_t *dumper, const char *name) {
 
   if (pcap_dump_flush(dumper) == 0 && !ferror(pcap_dump_file(dumper))) {
@@ -940,9 +958,6 @@ static int check_output(pcap_dumper_t *dumper, const char *name) {
 
   if (errno == EPIPE) {
     return -EPIPE;
-  }
-  if (errno == EINTR && g_stop) {
-    return -ECANCELED;
   }
 
   fprintf(stderr, "%s: %s\n", name,
@@ -1105,6 +1120,7 @@ int main(int argc, char *argv[]) {
   int n = 0;
   int transient_retries = 0;
   int output_closed = 0;
+  int blocking_output = 0;
   while (((count == 0) || (n < count)) && !g_stop) {
 
     // Trigger scan and wait for it to finish
@@ -1188,17 +1204,22 @@ int main(int argc, char *argv[]) {
         exit_code = EXIT_RUNTIME_ERROR;
         goto cleanup;
       }
+      blocking_output = output_can_block(dumper);
     }
 
     // Write the scan's frames and flush them, to a file as well as to
     // stdout, so that each finished scan is in the output even if scandump
     // is killed later. Stop on a write error rather than keep scanning into
-    // a broken output, and quietly if the reader closed the pipe or a stop
-    // signal interrupted the write.
+    // a broken output, and quietly if the reader closed the pipe.
     errno = 0;
+    g_exit_on_stop = blocking_output;
+    if (g_exit_on_stop && g_stop) {
+      _exit(0); // a stop before the flag was set would not end the write
+    }
     write_frames(&dump_ctx, dumper);
     err = check_output(dumper, output_name);
-    if (err == -EPIPE || err == -ECANCELED) {
+    g_exit_on_stop = 0;
+    if (err == -EPIPE) {
       output_closed = 1;
       break;
     }
@@ -1226,7 +1247,7 @@ int main(int argc, char *argv[]) {
 cleanup:
   if (dumper) {
     // Skipped after an earlier error, which has been reported already, and
-    // when the reader has gone or a stop signal interrupted a write.
+    // when the reader has gone.
     errno = 0;
     if (exit_code == 0 && !output_closed &&
         check_output(dumper, output_name) == -1) {

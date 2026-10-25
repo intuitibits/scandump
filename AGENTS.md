@@ -136,7 +136,12 @@ Everything is in `scandump.c` and follows one flow:
    `check_output` flushes and checks the stream after each scan (file or
    stdout) and before closing; a write error stops the loop with a non-zero
    exit. SIGPIPE is ignored, so a reader closing the pipe shows up as
-   `-EPIPE`, which stops the loop quietly with status 0.
+   `-EPIPE`, which stops the loop quietly with status 0. A write to an
+   output that isn't a regular file (`output_can_block`) can block for as
+   long as the reader doesn't read, and the C library retries a partial
+   write without returning, so `g_stop` would go unseen; while such a write
+   is in progress `g_exit_on_stop` is set and a stop signal calls
+   `_exit(0)` from the handler instead, cutting off the scan being written.
 
 The scan loop in `main` repeats indefinitely unless `-c/--count` is given,
 waiting `-i/--interval` seconds between scans (not before the first or after
