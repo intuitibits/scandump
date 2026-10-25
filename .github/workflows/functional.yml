@@ -38,9 +38,27 @@ jobs:
           # every kernel, so only install it if the module is missing.
           if ! modinfo mac80211_hwsim > /dev/null 2>&1; then
             sudo apt-get install -y -q --no-install-recommends \
-              "linux-modules-extra-$(uname -r)"
+              "linux-modules-extra-$(uname -r)" || true
           fi
-          sudo modprobe mac80211_hwsim radios=2
+          if modinfo mac80211_hwsim > /dev/null 2>&1; then
+            sudo modprobe mac80211_hwsim radios=2
+          else
+            # Some runner kernels (6.17 azure) don't build it at all, but do
+            # have mac80211, so build it from the upstream source of the
+            # same version against the kernel's headers.
+            sudo apt-get install -y -q --no-install-recommends \
+              "linux-headers-$(uname -r)"
+            src="$RUNNER_TEMP/hwsim"
+            tag="v$(uname -r | cut -d. -f1,2)"
+            mkdir -p "$src"
+            for f in mac80211_hwsim.c mac80211_hwsim.h; do
+              curl -fsSL -o "$src/$f" "https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/plain/drivers/net/wireless/virtual/$f?h=$tag"
+            done
+            echo 'obj-m := mac80211_hwsim.o' > "$src/Kbuild"
+            make -C "/lib/modules/$(uname -r)/build" M="$src" modules
+            sudo modprobe mac80211
+            sudo insmod "$src/mac80211_hwsim.ko" radios=2
+          fi
           iw dev
           printf '%s\n' interface=wlan0 driver=nl80211 "ssid=$SSID" \
             hw_mode=g channel=6 > "$RUNNER_TEMP/hostapd.conf"
